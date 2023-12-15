@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  ragdocparser:
+    build: .
+    container_name: ragdocparser-app
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./documents:/app/documents  # Mount for document input
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - COHERE_API_KEY=${COHERE_API_KEY}
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8001
+    depends_on:
+      - chromadb
+    networks:
+      - ragdocparser-network
+
+  chromadb:
+    image: ghcr.io/chroma-core/chroma:latest
+    container_name: ragdocparser-chromadb
+    ports:
+      - "8001:8000"
+    volumes:
+      - chroma_data:/chroma/chroma
+    environment:
+      - CHROMA_SERVER_AUTH_CREDENTIALS_PROVIDER=chromadb.auth.providers.HtpasswdConfigProvider
+      - CHROMA_SERVER_AUTH_CREDENTIALS_FILE=/chroma/auth/users.htpasswd
+      - CHROMA_SERVER_AUTH_PROVIDER=chromadb.auth.basic_auth.BasicAuthenticationServerProvider
+    networks:
+      - ragdocparser-network
+
+volumes:
+  chroma_data:
+    driver: local
+
+networks:
+  ragdocparser-network:
+    driver: bridge 
