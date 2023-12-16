@@ -2,3 +2,11 @@
 python-dotenv>=1.0.0
 pydantic>=2.0.0
 click>=8.0.0
+
+# Document parsing
+PyPDF2>=3.0.0
+python-docx>=0.8.11
+
+# Text processing
+nltk>=3.8
+spacy>=3.6.0
