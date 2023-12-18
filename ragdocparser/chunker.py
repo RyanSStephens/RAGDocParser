@@ -1,237 +1,282 @@
 """
-Text chunking module optimized for RAG systems.
+Text chunking utilities for document processing.
 """
 
 import re
-from typing import List, Dict, Any, Optional
+import logging
+from typing import List, Dict, Any, Optional, Union
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
-import tiktoken
-from sentence_transformers import SentenceTransformer
+
+logger = logging.getLogger(__name__)
+
 
 @dataclass
-class TextChunk:
-    """Represents a chunk of text with metadata."""
+class Chunk:
+    """Represents a text chunk with metadata."""
     content: str
     start_index: int
     end_index: int
-    token_count: int
-    metadata: Dict[str, Any]
-    embedding: Optional[List[float]] = None
+    chunk_id: str
+    metadata: Dict[str, Any] = None
+    
+    def __post_init__(self):
+        if self.metadata is None:
+            self.metadata = {}
+        
+        # Calculate basic statistics
+        self.metadata.update({
+            'length': len(self.content),
+            'word_count': len(self.content.split()),
+            'char_count': len(self.content),
+        })
 
-class TextChunker:
-    """Advanced text chunker optimized for RAG performance."""
+
+class BaseChunker(ABC):
+    """Base class for text chunkers."""
     
-    def __init__(self, 
-                 chunk_size: int = 1000,
-                 chunk_overlap: int = 200,
-                 min_chunk_size: int = 100,
-                 encoding_name: str = "cl100k_base"):
-        """Initialize text chunker.
-        
-        Args:
-            chunk_size: Target size for each chunk in tokens
-            chunk_overlap: Overlap between consecutive chunks
-            min_chunk_size: Minimum chunk size to avoid tiny chunks
-            encoding_name: Tokenizer encoding to use
-        """
+    def __init__(self, chunk_size: int = 1000, overlap: int = 200):
         self.chunk_size = chunk_size
-        self.chunk_overlap = chunk_overlap
-        self.min_chunk_size = min_chunk_size
-        
-        try:
-            self.encoding = tiktoken.get_encoding(encoding_name)
-        except Exception:
-            # Fallback to a simpler tokenizer
-            self.encoding = None
-            
-        self.sentence_model = None
+        self.overlap = overlap
     
-    def _count_tokens(self, text: str) -> int:
-        """Count tokens in text."""
-        if self.encoding:
-            return len(self.encoding.encode(text))
-        else:
-            # Rough approximation: 1 token ≈ 4 characters
-            return len(text) // 4
+    @abstractmethod
+    def chunk(self, text: str, metadata: Dict[str, Any] = None) -> List[Chunk]:
+        """Split text into chunks."""
+        pass
+
+
+class FixedSizeChunker(BaseChunker):
+    """Simple fixed-size chunker with overlap."""
     
-    def _split_by_sentences(self, text: str) -> List[str]:
-        """Split text into sentences."""
-        # Simple sentence splitting - could be enhanced with spaCy/NLTK
-        sentence_endings = r'[.!?]+\s+'
-        sentences = re.split(sentence_endings, text)
-        return [s.strip() for s in sentences if s.strip()]
-    
-    def _split_by_paragraphs(self, text: str) -> List[str]:
-        """Split text into paragraphs."""
-        paragraphs = re.split(r'\n\s*\n', text)
-        return [p.strip() for p in paragraphs if p.strip()]
-    
-    def chunk_text(self, 
-                   text: str, 
-                   metadata: Optional[Dict[str, Any]] = None) -> List[TextChunk]:
-        """Chunk text using hierarchical approach.
-        
-        Args:
-            text: Text to chunk
-            metadata: Optional metadata to attach to chunks
-            
-        Returns:
-            List of TextChunk objects
-        """
+    def chunk(self, text: str, metadata: Dict[str, Any] = None) -> List[Chunk]:
+        """Split text into fixed-size chunks with overlap."""
         if not text.strip():
             return []
-            
-        metadata = metadata or {}
+        
         chunks = []
+        start = 0
+        chunk_id = 0
         
-        # First try paragraph-based chunking
-        paragraphs = self._split_by_paragraphs(text)
-        current_chunk = ""
-        current_start = 0
-        
-        for paragraph in paragraphs:
-            paragraph_tokens = self._count_tokens(paragraph)
-            current_tokens = self._count_tokens(current_chunk)
+        while start < len(text):
+            end = min(start + self.chunk_size, len(text))
             
-            # If adding this paragraph would exceed chunk size
-            if current_tokens + paragraph_tokens > self.chunk_size and current_chunk:
-                # Save current chunk
-                chunk = self._create_chunk(
-                    current_chunk, 
-                    current_start, 
-                    current_start + len(current_chunk),
-                    metadata
+            # Try to break at word boundary
+            if end < len(text):
+                # Look for the last space before the end
+                last_space = text.rfind(' ', start, end)
+                if last_space > start:
+                    end = last_space
+            
+            chunk_content = text[start:end].strip()
+            if chunk_content:
+                chunk = Chunk(
+                    content=chunk_content,
+                    start_index=start,
+                    end_index=end,
+                    chunk_id=f"chunk_{chunk_id}",
+                    metadata=metadata.copy() if metadata else {}
                 )
                 chunks.append(chunk)
-                
-                # Start new chunk with overlap
-                overlap_start = max(0, len(current_chunk) - self.chunk_overlap)
-                current_chunk = current_chunk[overlap_start:] + "\n\n" + paragraph
-                current_start = current_start + overlap_start
+                chunk_id += 1
+            
+            # Move start position with overlap
+            start = max(end - self.overlap, start + 1)
+            if start >= len(text):
+                break
+        
+        return chunks
+
+
+class SentenceChunker(BaseChunker):
+    """Chunker that respects sentence boundaries."""
+    
+    def __init__(self, chunk_size: int = 1000, overlap: int = 200):
+        super().__init__(chunk_size, overlap)
+        # Simple sentence boundary detection
+        self.sentence_pattern = re.compile(r'[.!?]+\s+')
+    
+    def chunk(self, text: str, metadata: Dict[str, Any] = None) -> List[Chunk]:
+        """Split text into chunks respecting sentence boundaries."""
+        if not text.strip():
+            return []
+        
+        # Split into sentences
+        sentences = self.sentence_pattern.split(text)
+        if not sentences:
+            return []
+        
+        chunks = []
+        current_chunk = ""
+        start_index = 0
+        chunk_id = 0
+        
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            
+            # Check if adding this sentence would exceed chunk size
+            potential_chunk = current_chunk + " " + sentence if current_chunk else sentence
+            
+            if len(potential_chunk) <= self.chunk_size:
+                current_chunk = potential_chunk
             else:
-                # Add paragraph to current chunk
+                # Create chunk from current content
                 if current_chunk:
-                    current_chunk += "\n\n" + paragraph
+                    chunk = Chunk(
+                        content=current_chunk.strip(),
+                        start_index=start_index,
+                        end_index=start_index + len(current_chunk),
+                        chunk_id=f"chunk_{chunk_id}",
+                        metadata=metadata.copy() if metadata else {}
+                    )
+                    chunks.append(chunk)
+                    chunk_id += 1
+                
+                # Start new chunk with overlap handling
+                if self.overlap > 0 and chunks:
+                    # Try to include some overlap from previous chunk
+                    prev_words = chunks[-1].content.split()
+                    overlap_words = prev_words[-min(self.overlap//10, len(prev_words)):]
+                    current_chunk = " ".join(overlap_words) + " " + sentence
                 else:
-                    current_chunk = paragraph
+                    current_chunk = sentence
+                
+                start_index = start_index + len(current_chunk) - len(sentence)
         
         # Add final chunk
         if current_chunk.strip():
-            chunk = self._create_chunk(
-                current_chunk,
-                current_start,
-                current_start + len(current_chunk),
-                metadata
+            chunk = Chunk(
+                content=current_chunk.strip(),
+                start_index=start_index,
+                end_index=start_index + len(current_chunk),
+                chunk_id=f"chunk_{chunk_id}",
+                metadata=metadata.copy() if metadata else {}
             )
             chunks.append(chunk)
         
-        # Handle oversized chunks by sentence splitting
-        final_chunks = []
-        for chunk in chunks:
-            if chunk.token_count > self.chunk_size * 1.5:
-                final_chunks.extend(self._split_large_chunk(chunk))
-            else:
-                final_chunks.append(chunk)
-        
-        # Filter out tiny chunks
-        final_chunks = [c for c in final_chunks if c.token_count >= self.min_chunk_size]
-        
-        return final_chunks
+        return chunks
+
+
+class ParagraphChunker(BaseChunker):
+    """Chunker that respects paragraph boundaries."""
     
-    def _create_chunk(self, 
-                      content: str, 
-                      start: int, 
-                      end: int, 
-                      metadata: Dict[str, Any]) -> TextChunk:
-        """Create a TextChunk object."""
-        return TextChunk(
-            content=content.strip(),
-            start_index=start,
-            end_index=end,
-            token_count=self._count_tokens(content),
-            metadata=metadata.copy()
-        )
-    
-    def _split_large_chunk(self, chunk: TextChunk) -> List[TextChunk]:
-        """Split an oversized chunk into smaller ones."""
-        sentences = self._split_by_sentences(chunk.content)
-        sub_chunks = []
-        current_text = ""
-        current_start = chunk.start_index
+    def chunk(self, text: str, metadata: Dict[str, Any] = None) -> List[Chunk]:
+        """Split text into chunks respecting paragraph boundaries."""
+        if not text.strip():
+            return []
         
-        for sentence in sentences:
-            sentence_tokens = self._count_tokens(sentence)
-            current_tokens = self._count_tokens(current_text)
+        # Split by double newlines (paragraphs)
+        paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
+        
+        chunks = []
+        current_chunk = ""
+        start_index = 0
+        chunk_id = 0
+        
+        for paragraph in paragraphs:
+            potential_chunk = current_chunk + "\n\n" + paragraph if current_chunk else paragraph
             
-            if current_tokens + sentence_tokens > self.chunk_size and current_text:
-                # Create sub-chunk
-                sub_chunk = self._create_chunk(
-                    current_text,
-                    current_start,
-                    current_start + len(current_text),
-                    chunk.metadata
-                )
-                sub_chunks.append(sub_chunk)
+            if len(potential_chunk) <= self.chunk_size:
+                current_chunk = potential_chunk
+            else:
+                # Create chunk from current content
+                if current_chunk:
+                    chunk = Chunk(
+                        content=current_chunk.strip(),
+                        start_index=start_index,
+                        end_index=start_index + len(current_chunk),
+                        chunk_id=f"chunk_{chunk_id}",
+                        metadata=metadata.copy() if metadata else {}
+                    )
+                    chunks.append(chunk)
+                    chunk_id += 1
                 
-                # Start new with overlap
-                overlap_start = max(0, len(current_text) - self.chunk_overlap)
-                current_text = current_text[overlap_start:] + " " + sentence
-                current_start = current_start + overlap_start
-            else:
-                if current_text:
-                    current_text += " " + sentence
-                else:
-                    current_text = sentence
+                # Start new chunk
+                current_chunk = paragraph
+                start_index = start_index + len(current_chunk)
         
-        # Add final sub-chunk
-        if current_text.strip():
-            sub_chunk = self._create_chunk(
-                current_text,
-                current_start,
-                current_start + len(current_text),
-                chunk.metadata
+        # Add final chunk
+        if current_chunk.strip():
+            chunk = Chunk(
+                content=current_chunk.strip(),
+                start_index=start_index,
+                end_index=start_index + len(current_chunk),
+                chunk_id=f"chunk_{chunk_id}",
+                metadata=metadata.copy() if metadata else {}
             )
-            sub_chunks.append(sub_chunk)
+            chunks.append(chunk)
         
-        return sub_chunks
+        return chunks
+
+
+class TextChunker:
+    """Main text chunker with multiple strategies."""
     
-    def generate_embeddings(self, chunks: List[TextChunk], model_name: str = None):
-        """Generate embeddings for chunks.
+    def __init__(self, strategy: str = "sentence", chunk_size: int = 1000, overlap: int = 200):
+        self.chunk_size = chunk_size
+        self.overlap = overlap
+        self.strategy = strategy
         
-        Args:
-            chunks: List of TextChunk objects
-            model_name: Name of sentence transformer model
-        """
-        if not model_name:
-            model_name = "sentence-transformers/all-MiniLM-L6-v2"
-            
-        if not self.sentence_model or self.sentence_model.model_name != model_name:
-            self.sentence_model = SentenceTransformer(model_name)
+        self.chunkers = {
+            'fixed': FixedSizeChunker(chunk_size, overlap),
+            'sentence': SentenceChunker(chunk_size, overlap),
+            'paragraph': ParagraphChunker(chunk_size, overlap),
+        }
         
-        texts = [chunk.content for chunk in chunks]
-        embeddings = self.sentence_model.encode(texts, show_progress_bar=True)
-        
-        for i, chunk in enumerate(chunks):
-            chunk.embedding = embeddings[i].tolist()
+        if strategy not in self.chunkers:
+            raise ValueError(f"Unknown chunking strategy: {strategy}")
     
-    def chunk_documents(self, 
-                       documents: List[Dict[str, Any]]) -> List[TextChunk]:
-        """Chunk multiple documents.
-        
-        Args:
-            documents: List of documents with 'content' and optional metadata
-            
-        Returns:
-            List of all chunks from all documents
-        """
+    def chunk_text(self, text: str, metadata: Dict[str, Any] = None) -> List[Chunk]:
+        """Chunk text using the specified strategy."""
+        chunker = self.chunkers[self.strategy]
+        return chunker.chunk(text, metadata)
+    
+    def chunk_document(self, document: Dict[str, Any]) -> List[Chunk]:
+        """Chunk a parsed document."""
         all_chunks = []
         
-        for doc in documents:
-            content = doc.get('content', '')
-            metadata = doc.copy()
-            metadata.pop('content', None)
+        for page_data in document.get('content', []):
+            page_text = page_data.get('content', '')
+            page_num = page_data.get('page', 1)
             
-            chunks = self.chunk_text(content, metadata)
-            all_chunks.extend(chunks)
+            # Create metadata for this page
+            page_metadata = document.get('metadata', {}).copy()
+            page_metadata.update({
+                'page_number': page_num,
+                'file_path': document.get('file_path', ''),
+                'file_type': document.get('file_type', ''),
+            })
+            
+            # Chunk the page text
+            page_chunks = self.chunk_text(page_text, page_metadata)
+            
+            # Update chunk IDs to include page information
+            for i, chunk in enumerate(page_chunks):
+                chunk.chunk_id = f"page_{page_num}_chunk_{i}"
+                chunk.metadata['chunk_index'] = i
+            
+            all_chunks.extend(page_chunks)
         
-        return all_chunks 
+        return all_chunks
+    
+    def get_chunk_statistics(self, chunks: List[Chunk]) -> Dict[str, Any]:
+        """Calculate statistics for a list of chunks."""
+        if not chunks:
+            return {}
+        
+        lengths = [len(chunk.content) for chunk in chunks]
+        word_counts = [chunk.metadata.get('word_count', 0) for chunk in chunks]
+        
+        return {
+            'total_chunks': len(chunks),
+            'total_characters': sum(lengths),
+            'total_words': sum(word_counts),
+            'avg_chunk_length': sum(lengths) / len(lengths),
+            'avg_word_count': sum(word_counts) / len(word_counts),
+            'min_chunk_length': min(lengths),
+            'max_chunk_length': max(lengths),
+            'strategy_used': self.strategy,
+            'chunk_size_setting': self.chunk_size,
+            'overlap_setting': self.overlap,
+        }
