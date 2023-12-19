@@ -1,239 +1,306 @@
 #!/usr/bin/env python3
 """
-Command line interface for RAGDocParser.
+Command-line interface for RAG Document Parser.
 """
 
-import argparse
+import click
+import logging
 import sys
-import os
 from pathlib import Path
-import json
-from typing import List, Dict, Any
+from typing import Optional
 
-from ragdocparser import DocumentParser, Config
-from ragdocparser.scraper import WebScraper
+from ragdocparser.parser import DocumentParser
+from ragdocparser.chunker import TextChunker
+from ragdocparser.vectordb import DocumentVectorStore, OpenAIEmbeddingProvider
+from ragdocparser.config import config
 
-def parse_directory_command(args):
-    """Parse a directory of documents."""
-    config = Config(args.config) if args.config else Config()
-    parser = DocumentParser(config)
-    
-    print(f"Parsing directory: {args.directory}")
-    print(f"Recursive: {args.recursive}")
-    print(f"Collection: {args.collection}")
-    
-    # Parse documents
-    documents = parser.parse_directory(args.directory, recursive=args.recursive)
-    
-    if not documents:
-        print("No documents found or parsed.")
-        return
-    
-    print(f"Parsed {len(documents)} documents")
-    
-    # Save to vector database if requested
-    if not args.no_vectorize:
-        print("Processing and storing in vector database...")
-        chunks_count = parser.save_to_vector_db(documents, args.collection)
-        print(f"Created {chunks_count} chunks and stored in vector database")
-    
-    # Save raw documents if requested
-    if args.output:
-        print(f"Saving documents to {args.output}")
-        os.makedirs(args.output, exist_ok=True)
-        
-        for i, doc in enumerate(documents):
-            filename = f"doc_{i:03d}_{Path(doc.filename).stem}.txt"
-            filepath = os.path.join(args.output, filename)
-            
-            with open(filepath, 'w', encoding='utf-8') as f:
-                f.write(f"Source: {doc.filepath}\n")
-                f.write(f"Size: {doc.file_size} bytes\n")
-                f.write(f"Parse time: {doc.parse_time:.3f}s\n")
-                f.write("-" * 50 + "\n")
-                f.write(doc.content)
-        
-        # Save metadata
-        metadata = []
-        for doc in documents:
-            metadata.append({
-                'filename': doc.filename,
-                'filepath': doc.filepath,
-                'file_size': doc.file_size,
-                'parse_time': doc.parse_time,
-                'content_hash': doc.content_hash,
-                'metadata': doc.metadata
-            })
-        
-        with open(os.path.join(args.output, 'metadata.json'), 'w') as f:
-            json.dump(metadata, f, indent=2)
-        
-        print(f"Saved {len(documents)} documents to {args.output}")
 
-def parse_file_command(args):
-    """Parse a single file."""
-    config = Config(args.config) if args.config else Config()
-    parser = DocumentParser(config)
-    
-    print(f"Parsing file: {args.file}")
-    
-    document = parser.parse_file(args.file)
-    
-    if not document:
-        print("Failed to parse file.")
-        return
-    
-    print(f"Parsed {document.filename}")
-    print(f"Content length: {len(document.content)} characters")
-    print(f"Parse time: {document.parse_time:.3f}s")
-    
-    if args.output:
-        with open(args.output, 'w', encoding='utf-8') as f:
-            f.write(document.content)
-        print(f"Content saved to {args.output}")
-    else:
-        # Print first 500 characters
-        print("\nContent preview:")
-        print("-" * 50)
-        print(document.content[:500])
-        if len(document.content) > 500:
-            print("...")
-
-def scrape_command(args):
-    """Scrape a website."""
-    print(f"Scraping website: {args.url}")
-    
-    scraper = WebScraper(
-        delay=args.delay,
-        max_pages=args.max_pages
+def setup_logging(level: str = "INFO"):
+    """Setup logging configuration."""
+    logging.basicConfig(
+        level=getattr(logging, level.upper()),
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.StreamHandler(sys.stdout),
+            logging.FileHandler('ragdocparser.log')
+        ]
     )
-    
-    if args.docs_only:
-        pages = scraper.scrape_documentation_site(args.url)
-    else:
-        pages = scraper.scrape_site(args.url, max_depth=args.depth)
-    
-    print(f"Scraped {len(pages)} pages")
-    
-    if args.output:
-        scraper.save_scraped_data(args.output)
-        print(f"Saved scraped data to {args.output}")
-    
-    # Process with RAGDocParser if requested
-    if args.vectorize:
-        print("Processing scraped content...")
-        config = Config(args.config) if args.config else Config()
-        parser = DocumentParser(config)
-        
-        # Convert to document format
-        documents = []
-        for page in pages:
-            doc_info = type('DocumentInfo', (), {
-                'filename': f"scraped_{hash(page.url)}.html",
-                'filepath': page.url,
-                'content': page.content,
-                'metadata': {'title': page.title, 'url': page.url},
-                'parse_time': 0.0,
-                'file_size': len(page.content),
-                'content_hash': hash(page.content)
-            })()
-            documents.append(doc_info)
-        
-        chunks_count = parser.save_to_vector_db(documents, args.collection)
-        print(f"Created {chunks_count} chunks and stored in vector database")
 
-def search_command(args):
-    """Search the vector database."""
-    config = Config(args.config) if args.config else Config()
-    parser = DocumentParser(config)
-    
-    print(f"Searching for: {args.query}")
-    
-    results = parser.vectordb.search_similar(
-        args.query, 
-        k=args.limit, 
-        collection_name=args.collection
-    )
-    
-    if not results:
-        print("No results found.")
-        return
-    
-    print(f"Found {len(results)} results:")
-    print("-" * 50)
-    
-    for i, result in enumerate(results, 1):
-        print(f"{i}. {result.get('metadata', {}).get('source', 'Unknown source')}")
-        if 'distance' in result:
-            print(f"   Similarity: {1 - result['distance']:.3f}")
-        print(f"   Content: {result['content'][:200]}...")
-        print()
 
-def main():
-    """Main CLI entry point."""
-    parser = argparse.ArgumentParser(
-        description="RAGDocParser - Document parser optimized for RAG systems"
-    )
-    
-    parser.add_argument(
-        "--config", 
-        help="Path to configuration file"
-    )
-    
-    subparsers = parser.add_subparsers(dest='command', help='Available commands')
-    
-    # Parse directory command
-    parse_dir_parser = subparsers.add_parser('parse-dir', help='Parse a directory of documents')
-    parse_dir_parser.add_argument('directory', help='Directory to parse')
-    parse_dir_parser.add_argument('--recursive', '-r', action='store_true', help='Parse subdirectories')
-    parse_dir_parser.add_argument('--output', '-o', help='Output directory for parsed documents')
-    parse_dir_parser.add_argument('--collection', '-c', help='Vector database collection name')
-    parse_dir_parser.add_argument('--no-vectorize', action='store_true', help='Skip vector database storage')
-    
-    # Parse file command
-    parse_file_parser = subparsers.add_parser('parse-file', help='Parse a single file')
-    parse_file_parser.add_argument('file', help='File to parse')
-    parse_file_parser.add_argument('--output', '-o', help='Output file for parsed content')
-    
-    # Scrape command
-    scrape_parser = subparsers.add_parser('scrape', help='Scrape a website')
-    scrape_parser.add_argument('url', help='URL to scrape')
-    scrape_parser.add_argument('--output', '-o', help='Output directory for scraped content')
-    scrape_parser.add_argument('--delay', type=float, default=1.0, help='Delay between requests (seconds)')
-    scrape_parser.add_argument('--max-pages', type=int, default=50, help='Maximum pages to scrape')
-    scrape_parser.add_argument('--depth', type=int, default=3, help='Maximum crawl depth')
-    scrape_parser.add_argument('--docs-only', action='store_true', help='Only scrape documentation pages')
-    scrape_parser.add_argument('--vectorize', action='store_true', help='Store in vector database')
-    scrape_parser.add_argument('--collection', '-c', help='Vector database collection name')
-    
-    # Search command
-    search_parser = subparsers.add_parser('search', help='Search the vector database')
-    search_parser.add_argument('query', help='Search query')
-    search_parser.add_argument('--limit', '-l', type=int, default=5, help='Number of results to return')
-    search_parser.add_argument('--collection', '-c', help='Vector database collection name')
-    
-    args = parser.parse_args()
-    
-    if not args.command:
-        parser.print_help()
-        return
-    
+@click.group()
+@click.option('--log-level', default='INFO', help='Logging level')
+@click.pass_context
+def cli(ctx, log_level):
+    """RAG Document Parser CLI."""
+    ctx.ensure_object(dict)
+    setup_logging(log_level)
+    ctx.obj['log_level'] = log_level
+
+
+@cli.command()
+@click.argument('file_path', type=click.Path(exists=True))
+@click.option('--output', '-o', help='Output file for parsed content')
+@click.option('--format', 'output_format', default='json', 
+              type=click.Choice(['json', 'text', 'yaml']), 
+              help='Output format')
+def parse(file_path, output, output_format):
+    """Parse a document and extract text content."""
     try:
-        if args.command == 'parse-dir':
-            parse_directory_command(args)
-        elif args.command == 'parse-file':
-            parse_file_command(args)
-        elif args.command == 'scrape':
-            scrape_command(args)
-        elif args.command == 'search':
-            search_command(args)
+        parser = DocumentParser()
+        result = parser.parse(file_path)
+        
+        if output_format == 'json':
+            import json
+            output_content = json.dumps(result, indent=2, default=str)
+        elif output_format == 'yaml':
+            import yaml
+            output_content = yaml.dump(result, default_flow_style=False)
+        else:  # text
+            content_parts = []
+            for page in result.get('content', []):
+                content_parts.append(f"Page {page.get('page', 1)}:")
+                content_parts.append(page.get('content', ''))
+                content_parts.append('')
+            output_content = '\n'.join(content_parts)
+        
+        if output:
+            with open(output, 'w', encoding='utf-8') as f:
+                f.write(output_content)
+            click.echo(f"Parsed content saved to: {output}")
         else:
-            print(f"Unknown command: {args.command}")
-            parser.print_help()
-    
+            click.echo(output_content)
+            
     except Exception as e:
-        print(f"Error: {e}")
+        click.echo(f"Error parsing document: {e}", err=True)
         sys.exit(1)
 
+
+@cli.command()
+@click.argument('file_path', type=click.Path(exists=True))
+@click.option('--strategy', default='sentence', 
+              type=click.Choice(['fixed', 'sentence', 'paragraph']),
+              help='Chunking strategy')
+@click.option('--chunk-size', default=1000, help='Chunk size in characters')
+@click.option('--overlap', default=200, help='Overlap between chunks')
+@click.option('--output', '-o', help='Output file for chunks')
+def chunk(file_path, strategy, chunk_size, overlap, output):
+    """Parse and chunk a document."""
+    try:
+        # Parse document
+        parser = DocumentParser()
+        document = parser.parse(file_path)
+        
+        # Chunk document
+        chunker = TextChunker(
+            strategy=strategy,
+            chunk_size=chunk_size,
+            overlap=overlap
+        )
+        chunks = chunker.chunk_document(document)
+        
+        # Prepare output
+        chunk_data = {
+            'file_path': file_path,
+            'strategy': strategy,
+            'chunk_size': chunk_size,
+            'overlap': overlap,
+            'total_chunks': len(chunks),
+            'chunks': [
+                {
+                    'id': chunk.chunk_id,
+                    'content': chunk.content,
+                    'start_index': chunk.start_index,
+                    'end_index': chunk.end_index,
+                    'metadata': chunk.metadata
+                }
+                for chunk in chunks
+            ]
+        }
+        
+        # Get statistics
+        stats = chunker.get_chunk_statistics(chunks)
+        chunk_data['statistics'] = stats
+        
+        import json
+        output_content = json.dumps(chunk_data, indent=2, default=str)
+        
+        if output:
+            with open(output, 'w', encoding='utf-8') as f:
+                f.write(output_content)
+            click.echo(f"Chunks saved to: {output}")
+        else:
+            click.echo(output_content)
+        
+        # Print summary
+        click.echo(f"\nSummary:", err=True)
+        click.echo(f"  Total chunks: {len(chunks)}", err=True)
+        click.echo(f"  Average chunk length: {stats.get('avg_chunk_length', 0):.1f} characters", err=True)
+        click.echo(f"  Strategy used: {strategy}", err=True)
+            
+    except Exception as e:
+        click.echo(f"Error chunking document: {e}", err=True)
+        sys.exit(1)
+
+
+@cli.command()
+@click.argument('input_path', type=click.Path(exists=True))
+@click.option('--collection', default='documents', help='Vector database collection name')
+@click.option('--strategy', default='sentence', 
+              type=click.Choice(['fixed', 'sentence', 'paragraph']),
+              help='Chunking strategy')
+@click.option('--chunk-size', default=1000, help='Chunk size in characters')
+@click.option('--overlap', default=200, help='Overlap between chunks')
+@click.option('--recursive', is_flag=True, help='Process directories recursively')
+def index(input_path, collection, strategy, chunk_size, overlap, recursive):
+    """Index documents into vector database."""
+    try:
+        # Initialize components
+        parser = DocumentParser()
+        chunker = TextChunker(
+            strategy=strategy,
+            chunk_size=chunk_size,
+            overlap=overlap
+        )
+        
+        # Initialize vector store with OpenAI embeddings if available
+        embedding_provider = None
+        if config.openai_api_key:
+            try:
+                embedding_provider = OpenAIEmbeddingProvider()
+                click.echo("Using OpenAI embeddings")
+            except Exception as e:
+                click.echo(f"Warning: Could not initialize OpenAI embeddings: {e}")
+        
+        vector_store = DocumentVectorStore(
+            collection_name=collection,
+            embedding_provider=embedding_provider
+        )
+        
+        input_path = Path(input_path)
+        
+        if input_path.is_file():
+            # Process single file
+            files_to_process = [input_path]
+        else:
+            # Process directory
+            pattern = "**/*" if recursive else "*"
+            supported_formats = parser.supported_formats()
+            files_to_process = [
+                f for f in input_path.glob(pattern)
+                if f.is_file() and f.suffix.lower() in supported_formats
+            ]
+        
+        if not files_to_process:
+            click.echo("No supported files found to process")
+            return
+        
+        click.echo(f"Processing {len(files_to_process)} files...")
+        
+        total_chunks = 0
+        successful_files = 0
+        
+        for file_path in files_to_process:
+            try:
+                click.echo(f"Processing: {file_path}")
+                
+                # Parse document
+                document = parser.parse(file_path)
+                
+                # Add to vector store
+                chunks = vector_store.add_document(document, chunker)
+                total_chunks += len(chunks)
+                successful_files += 1
+                
+                click.echo(f"  Added {len(chunks)} chunks")
+                
+            except Exception as e:
+                click.echo(f"  Error processing {file_path}: {e}", err=True)
+                continue
+        
+        # Print summary
+        click.echo(f"\nIndexing complete:")
+        click.echo(f"  Files processed: {successful_files}/{len(files_to_process)}")
+        click.echo(f"  Total chunks added: {total_chunks}")
+        click.echo(f"  Collection: {collection}")
+        
+        # Show vector store stats
+        stats = vector_store.get_stats()
+        click.echo(f"  Vector store total documents: {stats.get('count', 0)}")
+            
+    except Exception as e:
+        click.echo(f"Error indexing documents: {e}", err=True)
+        sys.exit(1)
+
+
+@cli.command()
+@click.argument('query')
+@click.option('--collection', default='documents', help='Vector database collection name')
+@click.option('--limit', default=5, help='Number of results to return')
+@click.option('--file-type', help='Filter by file type')
+@click.option('--file-path', help='Filter by file path')
+def search(query, collection, limit, file_type, file_path):
+    """Search indexed documents."""
+    try:
+        # Initialize vector store
+        embedding_provider = None
+        if config.openai_api_key:
+            try:
+                embedding_provider = OpenAIEmbeddingProvider()
+            except Exception:
+                pass
+        
+        vector_store = DocumentVectorStore(
+            collection_name=collection,
+            embedding_provider=embedding_provider
+        )
+        
+        # Perform search
+        results = vector_store.search_documents(
+            query=query,
+            n_results=limit,
+            file_type=file_type,
+            file_path=file_path
+        )
+        
+        if not results:
+            click.echo("No results found")
+            return
+        
+        click.echo(f"Found {len(results)} results for query: '{query}'\n")
+        
+        for i, result in enumerate(results, 1):
+            click.echo(f"Result {i}:")
+            click.echo(f"  File: {result['metadata'].get('file_path', 'unknown')}")
+            click.echo(f"  Page: {result['metadata'].get('page_number', 'unknown')}")
+            click.echo(f"  Chunk ID: {result.get('id', 'unknown')}")
+            if result.get('distance') is not None:
+                click.echo(f"  Distance: {result['distance']:.4f}")
+            click.echo(f"  Content: {result['content'][:200]}{'...' if len(result['content']) > 200 else ''}")
+            click.echo()
+            
+    except Exception as e:
+        click.echo(f"Error searching documents: {e}", err=True)
+        sys.exit(1)
+
+
+@cli.command()
+@click.option('--collection', default='documents', help='Vector database collection name')
+def info(collection):
+    """Show information about the vector database."""
+    try:
+        vector_store = DocumentVectorStore(collection_name=collection)
+        stats = vector_store.get_stats()
+        
+        click.echo(f"Vector Database Information:")
+        click.echo(f"  Collection: {stats.get('name', 'unknown')}")
+        click.echo(f"  Total documents: {stats.get('count', 0)}")
+        click.echo(f"  Persist directory: {stats.get('persist_directory', 'unknown')}")
+        click.echo(f"  Embedding provider: {stats.get('embedding_provider', 'unknown')}")
+        
+    except Exception as e:
+        click.echo(f"Error getting database info: {e}", err=True)
+        sys.exit(1)
+
+
 if __name__ == '__main__':
-    main() 
+    cli()
