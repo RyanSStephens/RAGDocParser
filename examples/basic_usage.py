@@ -1,113 +1,149 @@
 #!/usr/bin/env python3
 """
-Basic usage examples for RAGDocParser.
+Basic usage examples for RAG Document Parser.
 """
 
 import os
-from ragdocparser import DocumentParser, Config
+from pathlib import Path
 
-def basic_document_parsing():
-    """Basic document parsing example."""
-    print("=== Basic Document Parsing ===")
+from ragdocparser import DocumentParser, TextChunker, DocumentVectorStore
+
+
+def example_parse_document():
+    """Example: Parse a single document."""
+    print("=== Document Parsing Example ===")
     
-    # Initialize parser with default configuration
+    # Initialize parser
     parser = DocumentParser()
     
-    # Parse a single file
-    document = parser.parse_file("sample_document.pdf")
-    if document:
-        print(f"Parsed: {document.filename}")
-        print(f"Content length: {len(document.content)} characters")
-        print(f"First 200 characters: {document.content[:200]}...")
+    # Show supported formats
+    print(f"Supported formats: {parser.supported_formats()}")
     
-    # Parse a directory
-    documents = parser.parse_directory("./docs", recursive=True)
-    print(f"\nParsed {len(documents)} documents from directory")
-    
-    # Process and store in vector database
-    if documents:
-        chunks_count = parser.save_to_vector_db(documents)
-        print(f"Created {chunks_count} chunks and stored in vector database")
+    # Parse a document (you'll need to provide a real file)
+    # document = parser.parse("path/to/your/document.pdf")
+    # print(f"Parsed document: {document['file_path']}")
+    # print(f"Pages: {document['metadata'].get('pages', 1)}")
+    # print(f"Content preview: {document['content'][0]['content'][:200]}...")
 
-def custom_configuration():
-    """Example with custom configuration."""
-    print("\n=== Custom Configuration ===")
-    
-    # Create custom configuration
-    config = Config()
-    config.set("chunking.chunk_size", 500)
-    config.set("chunking.chunk_overlap", 100)
-    config.set("vector_db.collection_name", "my_documents")
-    
-    # Initialize parser with custom config
-    parser = DocumentParser(config)
-    
-    # Parse and process documents
-    documents = parser.parse_directory("./docs")
-    if documents:
-        chunks_count = parser.save_to_vector_db(documents, "my_collection")
-        print(f"Processed {len(documents)} documents into {chunks_count} chunks")
 
-def search_example():
-    """Example of searching the vector database."""
-    print("\n=== Search Example ===")
+def example_chunk_text():
+    """Example: Chunk text using different strategies."""
+    print("\n=== Text Chunking Example ===")
     
-    parser = DocumentParser()
+    sample_text = """
+    This is a sample document for testing the chunking functionality.
+    It contains multiple sentences and paragraphs to demonstrate different chunking strategies.
     
-    # Search for similar content
-    results = parser.vectordb.search_similar("machine learning algorithms", k=3)
+    The first paragraph talks about the importance of text chunking in RAG applications.
+    Proper chunking ensures that relevant information is retrieved effectively.
     
-    print(f"Found {len(results)} results:")
-    for i, result in enumerate(results, 1):
-        print(f"{i}. {result['content'][:100]}...")
-        if 'distance' in result:
-            print(f"   Similarity score: {1 - result['distance']:.3f}")
-
-def web_scraping_example():
-    """Example of web scraping integration."""
-    print("\n=== Web Scraping Example ===")
+    The second paragraph discusses different chunking strategies.
+    Fixed-size chunking splits text into equal-sized chunks.
+    Sentence-based chunking respects sentence boundaries.
+    Paragraph-based chunking preserves paragraph structure.
+    """
     
-    from ragdocparser.scraper import WebScraper
+    # Test different chunking strategies
+    strategies = ['fixed', 'sentence', 'paragraph']
     
-    # Initialize scraper
-    scraper = WebScraper(delay=1.0, max_pages=10)
-    
-    # Scrape a documentation site
-    pages = scraper.scrape_documentation_site("https://docs.python.org")
-    print(f"Scraped {len(pages)} pages")
-    
-    # Convert to document format and process
-    if pages:
-        parser = DocumentParser()
-        documents = []
+    for strategy in strategies:
+        print(f"\n--- {strategy.title()} Chunking ---")
+        chunker = TextChunker(strategy=strategy, chunk_size=200, overlap=50)
         
-        for page in pages:
-            # Create pseudo-document from scraped page
-            doc_info = type('DocumentInfo', (), {
-                'filename': f"scraped_{hash(page.url)}.html",
-                'filepath': page.url,
-                'content': page.content,
-                'metadata': {'title': page.title, 'url': page.url},
-                'parse_time': 0.0,
-                'file_size': len(page.content),
-                'content_hash': hash(page.content)
-            })()
-            documents.append(doc_info)
+        # Create a mock document structure
+        mock_document = {
+            'content': [{'page': 1, 'content': sample_text}],
+            'metadata': {'file_path': 'sample.txt', 'file_type': 'txt'},
+            'file_path': 'sample.txt',
+            'file_type': 'txt'
+        }
         
-        chunks_count = parser.save_to_vector_db(documents, "scraped_docs")
-        print(f"Processed scraped content into {chunks_count} chunks")
+        chunks = chunker.chunk_document(mock_document)
+        stats = chunker.get_chunk_statistics(chunks)
+        
+        print(f"Generated {len(chunks)} chunks")
+        print(f"Average chunk length: {stats['avg_chunk_length']:.1f}")
+        
+        # Show first chunk
+        if chunks:
+            print(f"First chunk: {chunks[0].content[:100]}...")
 
-if __name__ == "__main__":
-    # Run examples (comment out sections that require actual files)
-    print("RAGDocParser Usage Examples")
-    print("=" * 40)
+
+def example_vector_database():
+    """Example: Use vector database for storage and search."""
+    print("\n=== Vector Database Example ===")
     
     try:
-        # basic_document_parsing()  # Uncomment if you have sample documents
-        custom_configuration()
-        # search_example()  # Uncomment if you have data in vector DB
-        # web_scraping_example()  # Uncomment to test web scraping
+        # Initialize vector store
+        vector_store = DocumentVectorStore(collection_name="example_docs")
+        
+        # Create sample chunks
+        from ragdocparser.chunker import Chunk
+        
+        sample_chunks = [
+            Chunk(
+                content="Machine learning is a subset of artificial intelligence.",
+                start_index=0,
+                end_index=59,
+                chunk_id="chunk_1",
+                metadata={"topic": "AI", "source": "textbook"}
+            ),
+            Chunk(
+                content="Natural language processing helps computers understand human language.",
+                start_index=60,
+                end_index=128,
+                chunk_id="chunk_2",
+                metadata={"topic": "NLP", "source": "textbook"}
+            ),
+            Chunk(
+                content="Vector databases enable efficient similarity search over embeddings.",
+                start_index=129,
+                end_index=195,
+                chunk_id="chunk_3",
+                metadata={"topic": "Vector DB", "source": "documentation"}
+            )
+        ]
+        
+        # Add chunks to vector database
+        vector_store.vector_db.add_chunks(sample_chunks)
+        print(f"Added {len(sample_chunks)} chunks to vector database")
+        
+        # Search for similar content
+        query = "What is machine learning?"
+        results = vector_store.search_documents(query, n_results=2)
+        
+        print(f"\nSearch results for: '{query}'")
+        for i, result in enumerate(results, 1):
+            print(f"{i}. {result['content']}")
+            print(f"   Metadata: {result['metadata']}")
+        
+        # Show database stats
+        stats = vector_store.get_stats()
+        print(f"\nDatabase stats: {stats}")
         
     except Exception as e:
-        print(f"Error running examples: {e}")
-        print("Make sure you have sample documents or modify the examples accordingly.") 
+        print(f"Vector database example failed (this is expected without proper setup): {e}")
+        print("To use vector database features, ensure you have:")
+        print("1. ChromaDB installed: pip install chromadb")
+        print("2. OpenAI API key set (optional): export OPENAI_API_KEY=your_key")
+
+
+def main():
+    """Run all examples."""
+    print("RAG Document Parser - Basic Usage Examples")
+    print("=" * 50)
+    
+    example_parse_document()
+    example_chunk_text()
+    example_vector_database()
+    
+    print("\n" + "=" * 50)
+    print("Examples completed!")
+    print("\nNext steps:")
+    print("1. Install required dependencies: pip install -r requirements.txt")
+    print("2. Set up environment variables (see .env.example)")
+    print("3. Try the CLI: python cli.py --help")
+
+
+if __name__ == "__main__":
+    main()
