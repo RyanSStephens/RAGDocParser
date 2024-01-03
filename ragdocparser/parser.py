@@ -1,5 +1,5 @@
 """
-Document parser for various file formats.
+Document parser for various file formats including OCR support.
 """
 
 import os
@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 from abc import ABC, abstractmethod
+from datetime import datetime
 
 try:
     import PyPDF2
@@ -20,6 +21,11 @@ try:
 except ImportError:
     DOCX_AVAILABLE = False
 
+try:
+    from .ocr import OCRProcessor, ImageDocumentParser
+    OCR_AVAILABLE = True
+except ImportError:
+    OCR_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -34,12 +40,17 @@ class BaseParser(ABC):
 
 
 class PDFParser(BaseParser):
-    """Parser for PDF documents."""
+    """Parser for PDF documents with OCR fallback."""
+    
+    def __init__(self, use_ocr_fallback: bool = True):
+        self.use_ocr_fallback = use_ocr_fallback and OCR_AVAILABLE
+        if self.use_ocr_fallback:
+            self.ocr_processor = OCRProcessor()
     
     def parse(self, file_path: Union[str, Path]) -> Dict[str, any]:
-        """Parse PDF document with improved error handling."""
+        """Parse PDF document with OCR fallback for image-based PDFs."""
         if not PDF_AVAILABLE:
-            raise ImportError("PyPDF2 is required for PDF parsing. Install with: pip install PyPDF2")
+            raise ImportError("PyPDF2 is required for PDF parsing")
         
         file_path = Path(file_path)
         if not file_path.exists():
@@ -47,6 +58,7 @@ class PDFParser(BaseParser):
         
         text_content = []
         metadata = {}
+        extraction_method = "text_extraction"
         
         try:
             with open(file_path, 'rb') as file:
@@ -66,19 +78,46 @@ class PDFParser(BaseParser):
                 
                 metadata['pages'] = len(pdf_reader.pages)
                 
+                # Try text extraction first
+                total_text_length = 0
                 for page_num, page in enumerate(pdf_reader.pages):
                     try:
                         page_text = page.extract_text()
                         if page_text and page_text.strip():
-                            # Clean up extracted text
                             cleaned_text = ' '.join(page_text.split())
                             text_content.append({
                                 'page': page_num + 1,
                                 'content': cleaned_text
                             })
+                            total_text_length += len(cleaned_text)
                     except Exception as e:
                         logger.warning(f"Error extracting text from page {page_num + 1}: {e}")
                         continue
+                
+                # If very little text was extracted, try OCR
+                if (total_text_length < 100 and self.use_ocr_fallback):
+                    logger.info(f"Low text extraction yield ({total_text_length} chars), trying OCR...")
+                    try:
+                        ocr_results = self.ocr_processor.extract_text_from_pdf_images(file_path)
+                        
+                        # Replace with OCR results if they contain more text
+                        ocr_text_length = sum(len(result.get('text', '')) for result in ocr_results)
+                        
+                        if ocr_text_length > total_text_length:
+                            text_content = []
+                            for result in ocr_results:
+                                if result.get('text', '').strip():
+                                    text_content.append({
+                                        'page': result.get('page', 1),
+                                        'content': result['text'].strip()
+                                    })
+                            
+                            extraction_method = "OCR"
+                            metadata['ocr_confidence'] = sum(r.get('confidence', 0) for r in ocr_results) / len(ocr_results)
+                            logger.info(f"OCR extracted {ocr_text_length} characters vs {total_text_length} from text extraction")
+                    
+                    except Exception as e:
+                        logger.warning(f"OCR fallback failed: {e}")
                         
         except Exception as e:
             logger.error(f"Error parsing PDF {file_path}: {e}")
@@ -86,6 +125,8 @@ class PDFParser(BaseParser):
         
         if not text_content:
             logger.warning(f"No text content extracted from PDF: {file_path}")
+        
+        metadata['extraction_method'] = extraction_method
         
         return {
             'content': text_content,
@@ -132,6 +173,7 @@ class TXTParser(BaseParser):
             'lines': len(content.splitlines()),
             'characters': len(content),
             'words': len(content.split()),
+            'extraction_method': 'direct_read'
         }
         
         return {
@@ -148,7 +190,7 @@ class DocxParser(BaseParser):
     def parse(self, file_path: Union[str, Path]) -> Dict[str, any]:
         """Parse DOCX document."""
         if not DOCX_AVAILABLE:
-            raise ImportError("python-docx is required for DOCX parsing. Install with: pip install python-docx")
+            raise ImportError("python-docx is required for DOCX parsing")
         
         file_path = Path(file_path)
         if not file_path.exists():
@@ -178,6 +220,7 @@ class DocxParser(BaseParser):
                 'last_modified_by': props.last_modified_by or '',
                 'paragraphs': len(doc.paragraphs),
                 'words': len(content.split()) if content else 0,
+                'extraction_method': 'docx_parsing'
             }
             
             return {
@@ -193,16 +236,24 @@ class DocxParser(BaseParser):
 
 
 class DocumentParser:
-    """Main document parser that handles multiple file formats."""
+    """Main document parser that handles multiple file formats including OCR."""
     
-    def __init__(self):
+    def __init__(self, use_ocr: bool = True):
+        self.use_ocr = use_ocr and OCR_AVAILABLE
+        
         self.parsers = {
-            '.pdf': PDFParser(),
+            '.pdf': PDFParser(use_ocr_fallback=self.use_ocr),
             '.txt': TXTParser(),
         }
         
         if DOCX_AVAILABLE:
             self.parsers['.docx'] = DocxParser()
+        
+        # Add image parsers if OCR is available
+        if self.use_ocr:
+            image_parser = ImageDocumentParser()
+            for fmt in image_parser.supported_formats:
+                self.parsers[fmt] = image_parser
     
     def parse(self, file_path: Union[str, Path]) -> Dict[str, any]:
         """Parse a document based on its file extension."""
