@@ -1,330 +1,309 @@
 """
-Web scraper module for extracting content from documentation sites.
+Web scraping functionality for extracting content from URLs.
 """
 
-import requests
-from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urlparse, parse_qs
-from typing import List, Dict, Any, Set, Optional
-import time
 import logging
-from dataclasses import dataclass
+import time
+import requests
+from typing import Dict, List, Any, Optional, Union
+from urllib.parse import urljoin, urlparse
 from pathlib import Path
-import json
-import re
+
+try:
+    from bs4 import BeautifulSoup
+    BS4_AVAILABLE = True
+except ImportError:
+    BS4_AVAILABLE = False
+
+try:
+    import selenium
+    from selenium import webdriver
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    SELENIUM_AVAILABLE = True
+except ImportError:
+    SELENIUM_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
-@dataclass
-class ScrapedPage:
-    """Represents a scraped web page."""
-    url: str
-    title: str
-    content: str
-    metadata: Dict[str, Any]
-    links: List[str]
 
 class WebScraper:
-    """Web scraper optimized for documentation sites."""
+    """Web scraper for extracting content from web pages."""
     
     def __init__(self, 
-                 delay: float = 1.0,
-                 max_pages: int = 100,
-                 user_agent: str = None):
-        """Initialize web scraper.
-        
-        Args:
-            delay: Delay between requests in seconds
-            max_pages: Maximum pages to scrape per domain
-            user_agent: Custom user agent string
-        """
+                 user_agent: str = "RAGDocParser/1.0",
+                 timeout: int = 30,
+                 delay: float = 1.0):
+        self.user_agent = user_agent
+        self.timeout = timeout
         self.delay = delay
-        self.max_pages = max_pages
+        
         self.session = requests.Session()
-        
-        # Set user agent
-        if user_agent:
-            self.session.headers.update({'User-Agent': user_agent})
-        else:
-            self.session.headers.update({
-                'User-Agent': 'RAGDocParser/1.0 (Document Parser Bot)'
-            })
-        
-        self.visited_urls: Set[str] = set()
-        self.scraped_pages: List[ScrapedPage] = []
+        self.session.headers.update({
+            'User-Agent': self.user_agent,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive',
+        })
     
-    def _clean_url(self, url: str) -> str:
-        """Clean and normalize URL."""
-        # Remove fragment
-        if '#' in url:
-            url = url.split('#')[0]
+    def extract_content_with_requests(self, url: str) -> Dict[str, Any]:
+        """Extract content using requests and BeautifulSoup."""
+        if not BS4_AVAILABLE:
+            raise ImportError("beautifulsoup4 is required for web scraping")
         
-        # Remove common tracking parameters
-        parsed = urlparse(url)
-        query_params = parse_qs(parsed.query)
-        
-        # Remove tracking parameters
-        tracking_params = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content']
-        for param in tracking_params:
-            query_params.pop(param, None)
-        
-        # Rebuild URL
-        if query_params:
-            query_string = '&'.join([f"{k}={v[0]}" for k, v in query_params.items()])
-            url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}?{query_string}"
-        else:
-            url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-        
-        return url
-    
-    def _extract_text_content(self, soup: BeautifulSoup, base_url: str) -> tuple[str, str, List[str]]:
-        """Extract text content, title, and links from soup."""
-        # Remove unwanted elements
-        for element in soup(['script', 'style', 'nav', 'header', 'footer', 'aside']):
-            element.decompose()
-        
-        # Extract title
-        title = ""
-        title_tag = soup.find('title')
-        if title_tag:
-            title = title_tag.get_text().strip()
-        
-        # Also try h1 if no title
-        if not title:
-            h1_tag = soup.find('h1')
-            if h1_tag:
-                title = h1_tag.get_text().strip()
-        
-        # Extract main content
-        content_selectors = [
-            'main', 'article', '.content', '.documentation', 
-            '.docs', '.main-content', '#content', '#main'
-        ]
-        
-        content_element = None
-        for selector in content_selectors:
-            content_element = soup.select_one(selector)
-            if content_element:
-                break
-        
-        if not content_element:
-            content_element = soup.find('body')
-        
-        if content_element:
-            # Get text content
-            content = content_element.get_text(separator='\n', strip=True)
-            
-            # Clean up content
-            lines = content.split('\n')
-            cleaned_lines = []
-            for line in lines:
-                line = line.strip()
-                if line and len(line) > 3:  # Filter out very short lines
-                    cleaned_lines.append(line)
-            
-            content = '\n'.join(cleaned_lines)
-        else:
-            content = ""
-        
-        # Extract links
-        links = []
-        for link in soup.find_all('a', href=True):
-            href = link['href']
-            absolute_url = urljoin(base_url, href)
-            
-            # Filter internal links only
-            if urlparse(absolute_url).netloc == urlparse(base_url).netloc:
-                cleaned_url = self._clean_url(absolute_url)
-                if cleaned_url not in links:
-                    links.append(cleaned_url)
-        
-        return content, title, links
-    
-    def _should_scrape_url(self, url: str, base_domain: str) -> bool:
-        """Check if URL should be scraped."""
-        parsed = urlparse(url)
-        
-        # Must be same domain
-        if parsed.netloc != base_domain:
-            return False
-        
-        # Skip common non-content URLs
-        skip_patterns = [
-            r'/search', r'/login', r'/register', r'/contact',
-            r'/api/', r'/admin/', r'\.pdf$', r'\.jpg$', r'\.png$',
-            r'\.css$', r'\.js$', r'/download/', r'/edit/'
-        ]
-        
-        for pattern in skip_patterns:
-            if re.search(pattern, url.lower()):
-                return False
-        
-        return True
-    
-    def scrape_page(self, url: str) -> Optional[ScrapedPage]:
-        """Scrape a single page."""
         try:
-            logger.info(f"Scraping: {url}")
-            
-            response = self.session.get(url, timeout=30)
+            response = self.session.get(url, timeout=self.timeout)
             response.raise_for_status()
             
+            # Parse HTML
             soup = BeautifulSoup(response.content, 'html.parser')
-            content, title, links = self._extract_text_content(soup, url)
             
-            if not content.strip():
-                logger.warning(f"No content extracted from {url}")
-                return None
+            # Extract metadata
+            title = soup.find('title')
+            title_text = title.get_text().strip() if title else ''
             
-            # Create metadata
+            # Extract meta description
+            meta_desc = soup.find('meta', attrs={'name': 'description'})
+            description = meta_desc.get('content', '') if meta_desc else ''
+            
+            # Extract main content
+            # Try to find main content areas
+            content_selectors = [
+                'main', 'article', '.content', '#content',
+                '.post-content', '.entry-content', '.article-content'
+            ]
+            
+            main_content = None
+            for selector in content_selectors:
+                element = soup.select_one(selector)
+                if element:
+                    main_content = element
+                    break
+            
+            # If no main content found, use body
+            if not main_content:
+                main_content = soup.find('body')
+            
+            # Remove unwanted elements
+            if main_content:
+                for unwanted in main_content.find_all(['script', 'style', 'nav', 'header', 'footer', 'aside']):
+                    unwanted.decompose()
+                
+                # Extract text
+                text_content = main_content.get_text(separator=' ', strip=True)
+            else:
+                text_content = soup.get_text(separator=' ', strip=True)
+            
+            # Extract links
+            links = []
+            for link in soup.find_all('a', href=True):
+                href = link['href']
+                link_text = link.get_text().strip()
+                if href and link_text:
+                    # Convert relative URLs to absolute
+                    absolute_url = urljoin(url, href)
+                    links.append({
+                        'url': absolute_url,
+                        'text': link_text
+                    })
+            
+            # Extract images
+            images = []
+            for img in soup.find_all('img', src=True):
+                src = img['src']
+                alt = img.get('alt', '')
+                absolute_url = urljoin(url, src)
+                images.append({
+                    'url': absolute_url,
+                    'alt': alt
+                })
+            
             metadata = {
                 'url': url,
+                'title': title_text,
+                'description': description,
                 'status_code': response.status_code,
                 'content_type': response.headers.get('content-type', ''),
-                'content_length': len(content),
-                'scraped_at': time.time()
+                'content_length': len(response.content),
+                'encoding': response.encoding,
+                'links_count': len(links),
+                'images_count': len(images),
+                'word_count': len(text_content.split()),
+                'char_count': len(text_content),
+                'extraction_method': 'requests_beautifulsoup'
             }
             
-            page = ScrapedPage(
-                url=url,
-                title=title or f"Page from {urlparse(url).netloc}",
-                content=content,
-                metadata=metadata,
-                links=links
-            )
-            
-            return page
+            return {
+                'content': text_content,
+                'metadata': metadata,
+                'links': links[:50],  # Limit links to avoid huge data
+                'images': images[:20],  # Limit images
+            }
             
         except Exception as e:
-            logger.error(f"Error scraping {url}: {e}")
-            return None
+            logger.error(f"Error scraping URL {url}: {e}")
+            raise
     
-    def scrape_site(self, 
-                   start_url: str, 
-                   max_depth: int = 3,
-                   url_patterns: List[str] = None) -> List[ScrapedPage]:
-        """Scrape an entire site starting from a URL.
+    def extract_content_with_selenium(self, url: str, wait_time: int = 10) -> Dict[str, Any]:
+        """Extract content using Selenium for JavaScript-heavy pages."""
+        if not SELENIUM_AVAILABLE:
+            raise ImportError("selenium is required for JavaScript-enabled scraping")
         
-        Args:
-            start_url: Starting URL to scrape
-            max_depth: Maximum depth to crawl
-            url_patterns: Optional regex patterns for URLs to include
+        driver = None
+        try:
+            # Setup Chrome driver with headless option
+            options = webdriver.ChromeOptions()
+            options.add_argument('--headless')
+            options.add_argument('--no-sandbox')
+            options.add_argument('--disable-dev-shm-usage')
+            options.add_argument(f'--user-agent={self.user_agent}')
             
-        Returns:
-            List of scraped pages
-        """
-        self.visited_urls.clear()
-        self.scraped_pages.clear()
-        
-        base_domain = urlparse(start_url).netloc
-        urls_to_visit = [(start_url, 0)]  # (url, depth)
-        
-        while urls_to_visit and len(self.scraped_pages) < self.max_pages:
-            current_url, depth = urls_to_visit.pop(0)
+            driver = webdriver.Chrome(options=options)
+            driver.set_page_load_timeout(self.timeout)
             
-            if current_url in self.visited_urls:
-                continue
+            # Load page
+            driver.get(url)
             
-            if depth > max_depth:
-                continue
+            # Wait for page to load
+            WebDriverWait(driver, wait_time).until(
+                EC.presence_of_element_located((By.TAG_NAME, "body"))
+            )
             
-            self.visited_urls.add(current_url)
+            # Additional wait for dynamic content
+            time.sleep(2)
             
-            # Add delay between requests
-            if len(self.visited_urls) > 1:
-                time.sleep(self.delay)
+            # Extract content
+            title = driver.title
             
-            # Scrape the page
-            page = self.scrape_page(current_url)
-            if page:
-                self.scraped_pages.append(page)
-                
-                # Add new URLs to visit
-                for link in page.links:
-                    if (link not in self.visited_urls and 
-                        self._should_scrape_url(link, base_domain)):
-                        
-                        # Check URL patterns if provided
-                        if url_patterns:
-                            if any(re.search(pattern, link) for pattern in url_patterns):
-                                urls_to_visit.append((link, depth + 1))
-                        else:
-                            urls_to_visit.append((link, depth + 1))
-        
-        logger.info(f"Scraped {len(self.scraped_pages)} pages from {base_domain}")
-        return self.scraped_pages
-    
-    def scrape_documentation_site(self, 
-                                base_url: str,
-                                docs_path: str = "/docs") -> List[ScrapedPage]:
-        """Scrape a documentation site with common patterns.
-        
-        Args:
-            base_url: Base URL of the site
-            docs_path: Path to documentation section
+            # Try to get main content
+            content_selectors = [
+                'main', 'article', '[role="main"]',
+                '.content', '#content', '.post-content'
+            ]
             
-        Returns:
-            List of scraped pages
-        """
-        start_url = urljoin(base_url, docs_path)
-        
-        # Common documentation URL patterns
-        doc_patterns = [
-            r'/docs/', r'/documentation/', r'/guide/', r'/tutorial/',
-            r'/api/', r'/reference/', r'/manual/'
-        ]
-        
-        return self.scrape_site(
-            start_url, 
-            max_depth=4, 
-            url_patterns=doc_patterns
-        )
-    
-    def save_scraped_data(self, output_dir: str):
-        """Save scraped data to files."""
-        output_path = Path(output_dir)
-        output_path.mkdir(exist_ok=True)
-        
-        # Save individual pages
-        for i, page in enumerate(self.scraped_pages):
-            filename = f"page_{i:03d}_{urlparse(page.url).path.replace('/', '_')}.txt"
-            # Clean filename
-            filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
+            main_content = None
+            for selector in content_selectors:
+                try:
+                    element = driver.find_element(By.CSS_SELECTOR, selector)
+                    main_content = element.text
+                    break
+                except:
+                    continue
             
-            with open(output_path / filename, 'w', encoding='utf-8') as f:
-                f.write(f"URL: {page.url}\n")
-                f.write(f"Title: {page.title}\n")
-                f.write(f"Scraped at: {time.ctime(page.metadata['scraped_at'])}\n")
-                f.write("-" * 50 + "\n")
-                f.write(page.content)
-        
-        # Save metadata
-        metadata = []
-        for page in self.scraped_pages:
-            metadata.append({
-                'url': page.url,
-                'title': page.title,
-                'content_length': len(page.content),
-                'scraped_at': page.metadata['scraped_at']
-            })
-        
-        with open(output_path / 'metadata.json', 'w') as f:
-            json.dump(metadata, f, indent=2)
-        
-        logger.info(f"Saved {len(self.scraped_pages)} pages to {output_dir}")
-    
-    def convert_to_documents(self) -> List[Dict[str, Any]]:
-        """Convert scraped pages to document format for processing."""
-        documents = []
-        
-        for page in self.scraped_pages:
-            doc = {
-                'content': page.content,
-                'title': page.title,
-                'url': page.url,
-                'source_type': 'web_scrape',
-                'scraped_at': page.metadata['scraped_at']
+            # If no main content found, use body
+            if not main_content:
+                body = driver.find_element(By.TAG_NAME, "body")
+                main_content = body.text
+            
+            # Extract links
+            links = []
+            try:
+                link_elements = driver.find_elements(By.TAG_NAME, "a")
+                for link in link_elements[:50]:  # Limit to avoid huge data
+                    href = link.get_attribute('href')
+                    text = link.text.strip()
+                    if href and text:
+                        links.append({'url': href, 'text': text})
+            except:
+                pass
+            
+            metadata = {
+                'url': url,
+                'title': title,
+                'word_count': len(main_content.split()),
+                'char_count': len(main_content),
+                'links_count': len(links),
+                'extraction_method': 'selenium_webdriver'
             }
-            documents.append(doc)
+            
+            return {
+                'content': main_content,
+                'metadata': metadata,
+                'links': links,
+            }
+            
+        except Exception as e:
+            logger.error(f"Error scraping URL with Selenium {url}: {e}")
+            raise
+        finally:
+            if driver:
+                driver.quit()
+    
+    def scrape_url(self, url: str, use_selenium: bool = False) -> Dict[str, Any]:
+        """Scrape content from a URL."""
+        logger.info(f"Scraping URL: {url}")
         
-        return documents 
+        # Add delay to be respectful
+        time.sleep(self.delay)
+        
+        if use_selenium:
+            result = self.extract_content_with_selenium(url)
+        else:
+            result = self.extract_content_with_requests(url)
+        
+        return result
+    
+    def scrape_multiple_urls(self, urls: List[str], use_selenium: bool = False) -> List[Dict[str, Any]]:
+        """Scrape content from multiple URLs."""
+        results = []
+        
+        for i, url in enumerate(urls):
+            try:
+                logger.info(f"Scraping URL {i+1}/{len(urls)}: {url}")
+                result = self.scrape_url(url, use_selenium=use_selenium)
+                results.append(result)
+                
+                # Add delay between requests
+                if i < len(urls) - 1:
+                    time.sleep(self.delay)
+                    
+            except Exception as e:
+                logger.error(f"Failed to scrape {url}: {e}")
+                continue
+        
+        return results
+
+
+class URLDocumentParser:
+    """Parser for URL-based documents."""
+    
+    def __init__(self, scraper: Optional[WebScraper] = None):
+        self.scraper = scraper or WebScraper()
+    
+    def parse(self, url: str, use_selenium: bool = False) -> Dict[str, Any]:
+        """Parse content from a URL."""
+        try:
+            # Validate URL
+            parsed_url = urlparse(url)
+            if not parsed_url.scheme or not parsed_url.netloc:
+                raise ValueError(f"Invalid URL: {url}")
+            
+            # Scrape content
+            scraped_data = self.scraper.scrape_url(url, use_selenium=use_selenium)
+            
+            # Format as document structure
+            content = scraped_data.get('content', '')
+            metadata = scraped_data.get('metadata', {})
+            
+            # Add additional metadata
+            metadata.update({
+                'source_type': 'web_page',
+                'domain': parsed_url.netloc,
+                'scheme': parsed_url.scheme,
+                'path': parsed_url.path,
+            })
+            
+            return {
+                'content': [{'page': 1, 'content': content}],
+                'metadata': metadata,
+                'file_path': url,
+                'file_type': 'url',
+                'links': scraped_data.get('links', []),
+                'images': scraped_data.get('images', []),
+            }
+            
+        except Exception as e:
+            logger.error(f"Error parsing URL {url}: {e}")
+            raise
