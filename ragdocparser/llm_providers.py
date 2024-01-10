@@ -1,283 +1,160 @@
 """
-LLM provider integrations for RAGDocParser.
+LLM provider integrations for text generation and analysis.
 """
 
-import os
-from typing import List, Dict, Any, Optional
-from abc import ABC, abstractmethod
 import logging
+import openai
+from typing import Dict, List, Any, Optional, Union
+from abc import ABC, abstractmethod
+
+try:
+    import anthropic
+    ANTHROPIC_AVAILABLE = True
+except ImportError:
+    ANTHROPIC_AVAILABLE = False
+
+from .config import config
 
 logger = logging.getLogger(__name__)
 
-class LLMProvider(ABC):
-    """Abstract base class for LLM providers."""
+
+class BaseLLMProvider(ABC):
+    """Base class for LLM providers."""
     
     @abstractmethod
-    def generate_response(self, query: str, context: List[str], **kwargs) -> str:
-        """Generate response using retrieved context."""
+    def generate_text(self, prompt: str, **kwargs) -> str:
+        """Generate text from a prompt."""
         pass
     
     @abstractmethod
-    def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
-        """Generate embeddings for texts."""
+    def generate_summary(self, text: str, max_length: int = 200) -> str:
+        """Generate a summary of the given text."""
         pass
 
-class OpenAIProvider(LLMProvider):
-    """OpenAI provider for GPT models."""
+
+class OpenAIProvider(BaseLLMProvider):
+    """OpenAI GPT provider."""
     
     def __init__(self, api_key: Optional[str] = None, model: str = "gpt-3.5-turbo"):
-        """Initialize OpenAI provider."""
-        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
-        self.model = model
-        
+        self.api_key = api_key or config.openai_api_key
         if not self.api_key:
-            raise ValueError("OpenAI API key not found")
+            raise ValueError("OpenAI API key is required")
         
-        try:
-            import openai
-            self.client = openai.OpenAI(api_key=self.api_key)
-        except ImportError:
-            raise ImportError("OpenAI package not installed. Install with: pip install openai")
+        openai.api_key = self.api_key
+        self.model = model
     
-    def generate_response(self, query: str, context: List[str], **kwargs) -> str:
-        """Generate response using GPT model."""
-        context_text = "\n".join(context)
-        
-        prompt = f"""Based on the following context, answer the question. If the answer cannot be found in the context, say "I don't have enough information to answer that question."
-
-Context:
-{context_text}
-
-Question: {query}
-
-Answer:"""
-        
+    def generate_text(self, prompt: str, max_tokens: int = 1000, temperature: float = 0.7) -> str:
+        """Generate text using OpenAI GPT."""
         try:
-            response = self.client.chat.completions.create(
+            response = openai.ChatCompletion.create(
                 model=self.model,
-                messages=[
-                    {"role": "system", "content": "You are a helpful assistant that answers questions based on provided context."},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=kwargs.get("max_tokens", 500),
-                temperature=kwargs.get("temperature", 0.7)
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_tokens,
+                temperature=temperature
             )
-            
             return response.choices[0].message.content.strip()
-        
         except Exception as e:
-            logger.error(f"Error generating OpenAI response: {e}")
-            return "Error generating response."
+            logger.error(f"Error generating text with OpenAI: {e}")
+            raise
     
-    def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
-        """Generate embeddings using OpenAI."""
-        try:
-            response = self.client.embeddings.create(
-                model="text-embedding-ada-002",
-                input=texts
-            )
-            
-            return [item.embedding for item in response.data]
-        
-        except Exception as e:
-            logger.error(f"Error generating OpenAI embeddings: {e}")
-            return []
+    def generate_summary(self, text: str, max_length: int = 200) -> str:
+        """Generate a summary using OpenAI."""
+        prompt = f"""Please provide a concise summary of the following text in approximately {max_length} characters:
 
-class AnthropicProvider(LLMProvider):
-    """Anthropic provider for Claude models."""
-    
-    def __init__(self, api_key: Optional[str] = None, model: str = "claude-2.1"):
-        """Initialize Anthropic provider."""
-        self.api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
-        self.model = model
+{text}
+
+Summary:"""
         
+        return self.generate_text(prompt, max_tokens=max_length//3)
+
+
+class AnthropicProvider(BaseLLMProvider):
+    """Anthropic Claude provider."""
+    
+    def __init__(self, api_key: Optional[str] = None, model: str = "claude-2"):
+        if not ANTHROPIC_AVAILABLE:
+            raise ImportError("anthropic package is required for Claude integration")
+        
+        self.api_key = api_key or config.anthropic_api_key
         if not self.api_key:
-            raise ValueError("Anthropic API key not found")
+            raise ValueError("Anthropic API key is required")
         
-        try:
-            import anthropic
-            self.client = anthropic.Anthropic(api_key=self.api_key)
-        except ImportError:
-            raise ImportError("Anthropic package not installed. Install with: pip install anthropic")
-    
-    def generate_response(self, query: str, context: List[str], **kwargs) -> str:
-        """Generate response using Claude model."""
-        context_text = "\n".join(context)
-        
-        prompt = f"""Based on the following context, answer the question. If the answer cannot be found in the context, say "I don't have enough information to answer that question."
-
-Context:
-{context_text}
-
-Question: {query}
-
-Answer:"""
-        
-        try:
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=kwargs.get("max_tokens", 500),
-                temperature=kwargs.get("temperature", 0.7),
-                messages=[
-                    {"role": "user", "content": prompt}
-                ]
-            )
-            
-            return response.content[0].text.strip()
-        
-        except Exception as e:
-            logger.error(f"Error generating Anthropic response: {e}")
-            return "Error generating response."
-    
-    def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
-        """Generate embeddings (Anthropic doesn't provide embeddings API)."""
-        logger.warning("Anthropic doesn't provide embeddings API. Use OpenAI or local models.")
-        return []
-
-class CohereProvider(LLMProvider):
-    """Cohere provider for command models."""
-    
-    def __init__(self, api_key: Optional[str] = None, model: str = "command"):
-        """Initialize Cohere provider."""
-        self.api_key = api_key or os.getenv("COHERE_API_KEY")
+        self.client = anthropic.Anthropic(api_key=self.api_key)
         self.model = model
-        
-        if not self.api_key:
-            raise ValueError("Cohere API key not found")
-        
-        try:
-            import cohere
-            self.client = cohere.Client(self.api_key)
-        except ImportError:
-            raise ImportError("Cohere package not installed. Install with: pip install cohere")
     
-    def generate_response(self, query: str, context: List[str], **kwargs) -> str:
-        """Generate response using Cohere model."""
-        context_text = "\n".join(context)
-        
-        prompt = f"""Based on the following context, answer the question. If the answer cannot be found in the context, say "I don't have enough information to answer that question."
-
-Context:
-{context_text}
-
-Question: {query}
-
-Answer:"""
-        
+    def generate_text(self, prompt: str, max_tokens: int = 1000, temperature: float = 0.7) -> str:
+        """Generate text using Anthropic Claude."""
         try:
-            response = self.client.generate(
+            response = self.client.completions.create(
                 model=self.model,
-                prompt=prompt,
-                max_tokens=kwargs.get("max_tokens", 500),
-                temperature=kwargs.get("temperature", 0.7),
-                stop_sequences=kwargs.get("stop_sequences", [])
+                prompt=f"\n\nHuman: {prompt}\n\nAssistant:",
+                max_tokens_to_sample=max_tokens,
+                temperature=temperature
             )
-            
-            return response.generations[0].text.strip()
-        
+            return response.completion.strip()
         except Exception as e:
-            logger.error(f"Error generating Cohere response: {e}")
-            return "Error generating response."
+            logger.error(f"Error generating text with Anthropic: {e}")
+            raise
     
-    def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
-        """Generate embeddings using Cohere."""
-        try:
-            response = self.client.embed(
-                texts=texts,
-                model="embed-english-v3.0"
-            )
-            
-            return response.embeddings
-        
-        except Exception as e:
-            logger.error(f"Error generating Cohere embeddings: {e}")
-            return []
+    def generate_summary(self, text: str, max_length: int = 200) -> str:
+        """Generate a summary using Claude."""
+        prompt = f"""Please provide a concise summary of the following text in approximately {max_length} characters:
 
-class RAGManager:
-    """Manages RAG pipeline with different LLM providers."""
+{text}"""
+        
+        return self.generate_text(prompt, max_tokens=max_length//3)
+
+
+class LLMManager:
+    """Manager for multiple LLM providers."""
     
-    def __init__(self, provider: LLMProvider, vectordb_manager):
-        """Initialize RAG manager."""
-        self.provider = provider
-        self.vectordb = vectordb_manager
+    def __init__(self):
+        self.providers = {}
+        
+        # Initialize available providers
+        if config.openai_api_key:
+            try:
+                self.providers['openai'] = OpenAIProvider()
+                logger.info("OpenAI provider initialized")
+            except Exception as e:
+                logger.warning(f"Failed to initialize OpenAI provider: {e}")
+        
+        if config.anthropic_api_key and ANTHROPIC_AVAILABLE:
+            try:
+                self.providers['anthropic'] = AnthropicProvider()
+                logger.info("Anthropic provider initialized")
+            except Exception as e:
+                logger.warning(f"Failed to initialize Anthropic provider: {e}")
     
-    def ask_question(self, 
-                    question: str, 
-                    collection_name: str = None,
-                    k: int = 5,
-                    **kwargs) -> Dict[str, Any]:
-        """Ask a question and get an answer with sources."""
-        
-        # Retrieve relevant documents
-        search_results = self.vectordb.search_similar(
-            question, 
-            k=k, 
-            collection_name=collection_name
-        )
-        
-        if not search_results:
-            return {
-                "answer": "No relevant documents found for your question.",
-                "sources": [],
-                "confidence": 0.0
-            }
-        
-        # Extract context
-        context = [result["content"] for result in search_results]
-        
-        # Generate answer
-        answer = self.provider.generate_response(question, context, **kwargs)
-        
-        # Calculate confidence based on similarity scores
-        if search_results and "distance" in search_results[0]:
-            avg_similarity = sum(1 - r.get("distance", 1) for r in search_results) / len(search_results)
-            confidence = min(avg_similarity, 1.0)
-        else:
-            confidence = 0.5  # Default confidence when no distance available
-        
-        # Prepare sources
-        sources = []
-        for result in search_results:
-            source = {
-                "content": result["content"][:200] + "...",
-                "metadata": result.get("metadata", {}),
-                "similarity": 1 - result.get("distance", 0) if "distance" in result else None
-            }
-            sources.append(source)
-        
-        return {
-            "answer": answer,
-            "sources": sources,
-            "confidence": confidence,
-            "question": question
-        }
+    def get_provider(self, provider_name: str) -> BaseLLMProvider:
+        """Get a specific provider."""
+        if provider_name not in self.providers:
+            raise ValueError(f"Provider {provider_name} not available. Available: {list(self.providers.keys())}")
+        return self.providers[provider_name]
     
-    def chat(self, 
-            question: str,
-            chat_history: List[Dict[str, str]] = None,
-            collection_name: str = None,
-            k: int = 5) -> Dict[str, Any]:
-        """Enhanced chat with conversation history."""
+    def generate_document_summary(self, document: Dict[str, Any], provider: str = None) -> str:
+        """Generate a summary for a document."""
+        if not self.providers:
+            raise RuntimeError("No LLM providers available")
         
-        chat_history = chat_history or []
+        # Use specified provider or default to first available
+        provider_name = provider or list(self.providers.keys())[0]
+        llm_provider = self.get_provider(provider_name)
         
-        # Build context from chat history
-        history_context = ""
-        if chat_history:
-            history_context = "\n".join([
-                f"Human: {turn['question']}\nAssistant: {turn['answer']}"
-                for turn in chat_history[-3:]  # Last 3 turns
-            ])
+        # Combine document content
+        content_parts = []
+        for page in document.get('content', []):
+            content_parts.append(page.get('content', ''))
         
-        # Get answer for current question
-        result = self.ask_question(question, collection_name, k)
+        full_text = ' '.join(content_parts)
         
-        # Add to chat history
-        chat_turn = {
-            "question": question,
-            "answer": result["answer"],
-            "sources": result["sources"],
-            "confidence": result["confidence"]
-        }
+        # Truncate if too long (keep first 4000 chars for context)
+        if len(full_text) > 4000:
+            full_text = full_text[:4000] + "..."
         
-        return chat_turn 
+        try:
+            summary = llm_provider.generate_summary(full_text)
+            return summary
+        except Exception as e:
+            logger.error(f"Error generating document summary: {e}")
+            raise
