@@ -1,328 +1,215 @@
 """
-FastAPI web interface for RAGDocParser.
-Provides REST API endpoints for document processing and question answering.
+FastAPI web interface for RAG Document Parser.
 """
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
-from typing import List, Dict, Any, Optional
-import asyncio
+from pydantic import BaseModel
+from typing import List, Optional, Dict, Any
 import tempfile
 import os
-from pathlib import Path
 import logging
+from pathlib import Path
 
-from .integration import RAGDocumentProcessor, create_processor
-from .config import RAGConfig
+from .integration import DocumentProcessor
 
 logger = logging.getLogger(__name__)
 
-# Pydantic models for API
-class QuestionRequest(BaseModel):
-    question: str = Field(..., description="Question to ask")
-    collection_name: str = Field("documents", description="Collection to search in")
-    k: int = Field(5, ge=1, le=20, description="Number of results to retrieve")
+# Pydantic models
+class SearchRequest(BaseModel):
+    query: str
+    n_results: int = 5
 
-class QuestionResponse(BaseModel):
-    answer: str
-    confidence: float
-    sources: List[Dict[str, Any]]
-    question: str
-    collection: str
-
-class ProcessDocumentsRequest(BaseModel):
-    collection_name: str = Field("documents", description="Collection name for storage")
-    use_ocr: bool = Field(True, description="Whether to use OCR for image-based documents")
+class SearchResult(BaseModel):
+    content: str
+    metadata: Dict[str, Any]
+    distance: Optional[float] = None
+    id: Optional[str] = None
 
 class ProcessingStatus(BaseModel):
-    task_id: str
-    status: str  # "pending", "processing", "completed", "failed"
-    progress: Dict[str, Any]
+    status: str
+    message: str
+    chunks: int = 0
 
-class CollectionInfo(BaseModel):
-    name: str
-    document_count: int
-    chunk_count: int
-    created_at: Optional[str] = None
+# Initialize FastAPI app
+app = FastAPI(
+    title="RAG Document Parser API",
+    description="API for processing documents and performing semantic search",
+    version="1.0.0"
+)
 
-# Global processor instance
-processor: Optional[RAGDocumentProcessor] = None
-processing_tasks: Dict[str, Dict] = {}
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-def create_app(config_path: str = None) -> FastAPI:
-    """Create and configure FastAPI application."""
-    
-    app = FastAPI(
-        title="RAGDocParser API",
-        description="REST API for document processing and RAG-based question answering",
-        version="1.5.0",
-        docs_url="/docs",
-        redoc_url="/redoc"
-    )
-    
-    # Enable CORS
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],  # Configure appropriately for production
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-    
-    # Initialize processor
-    @app.on_event("startup")
-    async def startup_event():
-        global processor
-        try:
-            processor = create_processor(config_path)
-            logger.info("RAGDocumentProcessor initialized successfully")
-        except Exception as e:
-            logger.error(f"Failed to initialize processor: {e}")
-            processor = None
-    
-    @app.on_event("shutdown")
-    async def shutdown_event():
-        global processor
-        if processor:
-            processor.cleanup()
-            logger.info("RAGDocumentProcessor cleaned up")
-    
-    return app
+# Global document processor
+processor = None
 
-app = create_app()
+@app.on_event("startup")
+async def startup_event():
+    """Initialize document processor on startup."""
+    global processor
+    try:
+        processor = DocumentProcessor()
+        logger.info("Document processor initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize document processor: {e}")
+        processor = None
 
-@app.get("/", response_model=Dict[str, str])
+@app.get("/")
 async def root():
-    """Root endpoint with API information."""
-    return {
-        "message": "RAGDocParser API",
-        "version": "1.0.0",
-        "docs": "/docs",
-        "status": "online" if processor else "offline"
-    }
+    """Root endpoint."""
+    return {"message": "RAG Document Parser API", "version": "1.0.0"}
 
-@app.get("/health", response_model=Dict[str, str])
+@app.get("/health")
 async def health_check():
     """Health check endpoint."""
-    if not processor:
-        raise HTTPException(status_code=503, detail="Processor not initialized")
-    
-    return {
-        "status": "healthy",
-        "processor": "online",
-        "collections": str(len(processor.get_collections_info()))
-    }
-
-@app.post("/ask", response_model=QuestionResponse)
-async def ask_question(request: QuestionRequest):
-    """Ask a question against the document collection."""
-    if not processor:
-        raise HTTPException(status_code=503, detail="Processor not initialized")
-    
-    if not processor.rag_manager:
-        raise HTTPException(status_code=400, detail="LLM provider not configured")
+    if processor is None:
+        raise HTTPException(status_code=503, detail="Document processor not initialized")
     
     try:
-        result = processor.ask_question(
-            request.question,
-            request.collection_name,
-            request.k
-        )
-        
-        return QuestionResponse(
-            answer=result["answer"],
-            confidence=result.get("confidence", 0.0),
-            sources=result.get("sources", []),
-            question=request.question,
-            collection=request.collection_name
-        )
-        
-    except Exception as e:
-        logger.error(f"Error processing question: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/upload", response_model=Dict[str, str])
-async def upload_documents(
-    background_tasks: BackgroundTasks,
-    files: List[UploadFile] = File(...),
-    collection_name: str = "documents",
-    use_ocr: bool = True
-):
-    """Upload and process documents."""
-    if not processor:
-        raise HTTPException(status_code=503, detail="Processor not initialized")
-    
-    if not files:
-        raise HTTPException(status_code=400, detail="No files provided")
-    
-    # Generate task ID
-    import uuid
-    task_id = str(uuid.uuid4())
-    
-    # Save files to temporary directory
-    temp_dir = tempfile.mkdtemp()
-    file_paths = []
-    
-    try:
-        for file in files:
-            if file.filename:
-                file_path = Path(temp_dir) / file.filename
-                with open(file_path, "wb") as f:
-                    content = await file.read()
-                    f.write(content)
-                file_paths.append(file_path)
-        
-        # Start background processing
-        background_tasks.add_task(
-            process_documents_task,
-            task_id,
-            file_paths,
-            collection_name,
-            use_ocr,
-            temp_dir
-        )
-        
-        processing_tasks[task_id] = {
-            "status": "pending",
-            "files": len(file_paths),
-            "collection": collection_name
+        stats = processor.get_statistics()
+        return {
+            "status": "healthy",
+            "processor_ready": True,
+            "statistics": stats
         }
-        
-        return {"task_id": task_id, "status": "processing_started"}
-        
     except Exception as e:
-        # Cleanup on error
-        import shutil
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        logger.error(f"Error uploading files: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Health check failed: {e}")
+        raise HTTPException(status_code=503, detail=f"Health check failed: {str(e)}")
 
-async def process_documents_task(
-    task_id: str,
-    file_paths: List[Path],
-    collection_name: str,
-    use_ocr: bool,
-    temp_dir: str
-):
-    """Background task for processing documents."""
+@app.post("/upload", response_model=ProcessingStatus)
+async def upload_document(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
+    """Upload and process a document."""
+    if processor is None:
+        raise HTTPException(status_code=503, detail="Document processor not initialized")
+    
+    # Check file type
+    allowed_extensions = {'.pdf', '.txt', '.docx', '.jpg', '.jpeg', '.png', '.tiff'}
+    file_extension = Path(file.filename).suffix.lower()
+    
+    if file_extension not in allowed_extensions:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Unsupported file type: {file_extension}. Allowed: {allowed_extensions}"
+        )
+    
     try:
-        processing_tasks[task_id]["status"] = "processing"
+        # Save uploaded file temporarily
+        with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as tmp_file:
+            content = await file.read()
+            tmp_file.write(content)
+            tmp_file_path = tmp_file.name
         
-        # Process documents
-        results = processor.process_documents(
-            file_paths,
-            collection_name,
-            use_ocr
+        # Process document in background
+        def process_file():
+            try:
+                result = processor.process_document(tmp_file_path)
+                # Clean up temp file
+                os.unlink(tmp_file_path)
+                logger.info(f"Processed {file.filename}: {result.get('chunks', 0)} chunks")
+            except Exception as e:
+                logger.error(f"Background processing failed for {file.filename}: {e}")
+                os.unlink(tmp_file_path)
+        
+        background_tasks.add_task(process_file)
+        
+        return ProcessingStatus(
+            status="accepted",
+            message=f"File {file.filename} accepted for processing",
+            chunks=0
         )
         
-        processing_tasks[task_id].update({
-            "status": "completed",
-            "results": results
-        })
+    except Exception as e:
+        logger.error(f"Error uploading file {file.filename}: {e}")
+        raise HTTPException(status_code=500, detail=f"Error processing file: {str(e)}")
+
+@app.post("/search", response_model=List[SearchResult])
+async def search_documents(request: SearchRequest):
+    """Search processed documents."""
+    if processor is None:
+        raise HTTPException(status_code=503, detail="Document processor not initialized")
+    
+    try:
+        results = processor.search_documents(request.query, request.n_results)
+        
+        search_results = []
+        for result in results:
+            search_results.append(SearchResult(
+                content=result['content'],
+                metadata=result['metadata'],
+                distance=result.get('distance'),
+                id=result.get('id')
+            ))
+        
+        return search_results
         
     except Exception as e:
-        processing_tasks[task_id].update({
-            "status": "failed",
-            "error": str(e)
-        })
-        logger.error(f"Processing task {task_id} failed: {e}")
-    
-    finally:
-        # Cleanup temporary directory
-        import shutil
-        shutil.rmtree(temp_dir, ignore_errors=True)
+        logger.error(f"Search error: {e}")
+        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
 
-@app.get("/tasks/{task_id}", response_model=ProcessingStatus)
-async def get_task_status(task_id: str):
-    """Get the status of a processing task."""
-    if task_id not in processing_tasks:
-        raise HTTPException(status_code=404, detail="Task not found")
-    
-    task_info = processing_tasks[task_id]
-    
-    return ProcessingStatus(
-        task_id=task_id,
-        status=task_info["status"],
-        progress=task_info
-    )
-
-@app.get("/collections", response_model=List[CollectionInfo])
-async def list_collections():
-    """List all available collections."""
-    if not processor:
-        raise HTTPException(status_code=503, detail="Processor not initialized")
+@app.get("/stats")
+async def get_statistics():
+    """Get processing statistics."""
+    if processor is None:
+        raise HTTPException(status_code=503, detail="Document processor not initialized")
     
     try:
-        collections = processor.get_collections_info()
-        return [
-            CollectionInfo(
-                name=col.get("name", "unknown"),
-                document_count=col.get("document_count", 0),
-                chunk_count=col.get("count", 0),
-                created_at=col.get("created_at")
-            )
-            for col in collections
-        ]
+        return processor.get_statistics()
     except Exception as e:
-        logger.error(f"Error listing collections: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error getting statistics: {e}")
+        raise HTTPException(status_code=500, detail=f"Error getting statistics: {str(e)}")
 
-@app.delete("/collections/{collection_name}")
-async def delete_collection(collection_name: str):
-    """Delete a collection."""
-    if not processor:
-        raise HTTPException(status_code=503, detail="Processor not initialized")
+@app.post("/qa")
+async def question_answering(request: SearchRequest):
+    """Question answering endpoint using search results."""
+    if processor is None:
+        raise HTTPException(status_code=503, detail="Document processor not initialized")
     
     try:
-        # This would need to be implemented in the vector database manager
-        # processor.vectordb.delete_collection(collection_name)
-        return {"message": f"Collection {collection_name} deletion requested"}
-    except Exception as e:
-        logger.error(f"Error deleting collection: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/search/{collection_name}")
-async def search_collection(
-    collection_name: str,
-    query: str,
-    k: int = 5
-):
-    """Search within a specific collection."""
-    if not processor:
-        raise HTTPException(status_code=503, detail="Processor not initialized")
-    
-    try:
-        results = processor.vectordb.search_similar(
-            query,
-            k=k,
-            collection_name=collection_name
-        )
+        # Search for relevant documents
+        search_results = processor.search_documents(request.query, request.n_results)
+        
+        if not search_results:
+            return {
+                "answer": "No relevant documents found for your question.",
+                "sources": []
+            }
+        
+        # Combine search results for context
+        context_parts = []
+        sources = []
+        
+        for result in search_results:
+            context_parts.append(result['content'])
+            sources.append({
+                "file": result['metadata'].get('file_path', 'unknown'),
+                "page": result['metadata'].get('page_number', 'unknown'),
+                "distance": result.get('distance')
+            })
+        
+        context = "\n\n".join(context_parts)
+        
+        # For now, return the most relevant chunk as answer
+        # In a real implementation, you'd use an LLM to generate an answer
+        answer = search_results[0]['content'][:500] + "..." if len(search_results[0]['content']) > 500 else search_results[0]['content']
         
         return {
-            "query": query,
-            "collection": collection_name,
-            "results": results
+            "answer": answer,
+            "sources": sources,
+            "context_used": len(context_parts)
         }
         
     except Exception as e:
-        logger.error(f"Error searching collection: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Q&A error: {e}")
+        raise HTTPException(status_code=500, detail=f"Q&A failed: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
-    
-    # Configure logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-    
-    uvicorn.run(
-        "ragdocparser.api:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True,
-        log_level="info"
-    ) 
+    uvicorn.run(app, host="0.0.0.0", port=8000)
