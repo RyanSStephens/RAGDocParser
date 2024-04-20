@@ -3,42 +3,34 @@ version: '3.8'
 services:
   ragdocparser:
     build: .
-    container_name: ragdocparser-app
     ports:
       - "8000:8000"
     volumes:
       - ./data:/app/data
-      - ./logs:/app/logs
-      - ./documents:/app/documents  # Mount for document input
+      - ./chroma_db:/app/chroma_db
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      - COHERE_API_KEY=${COHERE_API_KEY}
-      - CHROMA_HOST=chromadb
-      - CHROMA_PORT=8001
-    depends_on:
-      - chromadb
-    networks:
-      - ragdocparser-network
+      - CHROMA_PERSIST_DIRECTORY=/app/chroma_db
+      - LOG_LEVEL=INFO
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
-  chromadb:
-    image: ghcr.io/chroma-core/chroma:latest
-    container_name: ragdocparser-chromadb
+  frontend:
+    image: nginx:alpine
     ports:
-      - "8001:8000"
+      - "3000:80"
     volumes:
-      - chroma_data:/chroma/chroma
-    environment:
-      - CHROMA_SERVER_AUTH_CREDENTIALS_PROVIDER=chromadb.auth.providers.HtpasswdConfigProvider
-      - CHROMA_SERVER_AUTH_CREDENTIALS_FILE=/chroma/auth/users.htpasswd
-      - CHROMA_SERVER_AUTH_PROVIDER=chromadb.auth.basic_auth.BasicAuthenticationServerProvider
-    networks:
-      - ragdocparser-network
+      - ./frontend:/usr/share/nginx/html
+    depends_on:
+      - ragdocparser
+    restart: unless-stopped
 
 volumes:
   chroma_data:
-    driver: local
-
-networks:
-  ragdocparser-network:
-    driver: bridge 
+  app_data:
