@@ -1,89 +1,175 @@
 """
-Basic tests for RAGDocParser.
+Basic tests for RAG Document Parser.
 """
 
-import unittest
+import pytest
 import tempfile
-import os
 from pathlib import Path
 
-from ragdocparser import DocumentParser, Config, TextChunker
+from ragdocparser import DocumentParser, TextChunker, Chunk
 
-class TestDocumentParser(unittest.TestCase):
-    """Test DocumentParser functionality."""
+
+class TestDocumentParser:
+    """Test document parser functionality."""
     
-    def setUp(self):
-        """Set up test fixtures."""
-        self.config = Config()
-        self.parser = DocumentParser(self.config)
+    def test_supported_formats(self):
+        """Test that parser reports supported formats."""
+        parser = DocumentParser()
+        formats = parser.supported_formats()
         
-        # Create temporary test file
-        self.temp_dir = tempfile.mkdtemp()
-        self.test_file = os.path.join(self.temp_dir, "test.txt")
-        with open(self.test_file, 'w') as f:
-            f.write("This is a test document for RAGDocParser. " * 50)
-    
-    def tearDown(self):
-        """Clean up test fixtures."""
-        if os.path.exists(self.test_file):
-            os.remove(self.test_file)
-        os.rmdir(self.temp_dir)
+        assert isinstance(formats, list)
+        assert '.txt' in formats
+        assert '.pdf' in formats
     
     def test_parse_text_file(self):
         """Test parsing a text file."""
-        document = self.parser.parse_file(self.test_file)
-        self.assertIsNotNone(document)
-        self.assertEqual(document.filename, "test.txt")
-        self.assertGreater(len(document.content), 0)
-        self.assertIn("test document", document.content)
+        # Create a temporary text file
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+            f.write("This is a test document.\nIt has multiple lines.\nFor testing purposes.")
+            temp_path = f.name
+        
+        try:
+            parser = DocumentParser()
+            result = parser.parse(temp_path)
+            
+            assert result['file_type'] == 'txt'
+            assert len(result['content']) == 1
+            assert 'This is a test document' in result['content'][0]['content']
+            assert 'metadata' in result
+            assert result['metadata']['extraction_method'] == 'direct_read'
+            
+        finally:
+            Path(temp_path).unlink()
     
     def test_parse_nonexistent_file(self):
-        """Test parsing a file that doesn't exist."""
-        document = self.parser.parse_file("nonexistent.txt")
-        self.assertIsNone(document)
-
-class TestTextChunker(unittest.TestCase):
-    """Test TextChunker functionality."""
-    
-    def setUp(self):
-        """Set up test fixtures."""
-        self.chunker = TextChunker(chunk_size=100, chunk_overlap=20)
-    
-    def test_chunk_text(self):
-        """Test text chunking."""
-        text = "This is a test document. " * 20
-        chunks = self.chunker.chunk_text(text)
+        """Test parsing a nonexistent file raises error."""
+        parser = DocumentParser()
         
-        self.assertGreater(len(chunks), 0)
-        for chunk in chunks:
-            self.assertLessEqual(chunk.token_count, 150)  # Allowing some variance
-            self.assertGreater(len(chunk.content), 0)
+        with pytest.raises(FileNotFoundError):
+            parser.parse("nonexistent_file.txt")
     
-    def test_empty_text(self):
+    def test_parse_unsupported_format(self):
+        """Test parsing unsupported format raises error."""
+        with tempfile.NamedTemporaryFile(suffix='.xyz', delete=False) as f:
+            temp_path = f.name
+        
+        try:
+            parser = DocumentParser()
+            
+            with pytest.raises(ValueError, match="Unsupported file format"):
+                parser.parse(temp_path)
+                
+        finally:
+            Path(temp_path).unlink()
+
+
+class TestTextChunker:
+    """Test text chunking functionality."""
+    
+    def test_fixed_chunker(self):
+        """Test fixed-size chunking."""
+        text = "This is a test document. " * 100  # Long text
+        chunker = TextChunker(strategy='fixed', chunk_size=100, overlap=20)
+        
+        # Create mock document
+        document = {
+            'content': [{'page': 1, 'content': text}],
+            'metadata': {'file_path': 'test.txt'},
+            'file_path': 'test.txt',
+            'file_type': 'txt'
+        }
+        
+        chunks = chunker.chunk_document(document)
+        
+        assert len(chunks) > 1
+        assert all(isinstance(chunk, Chunk) for chunk in chunks)
+        assert all(len(chunk.content) <= 120 for chunk in chunks)  # Allow some flexibility
+    
+    def test_sentence_chunker(self):
+        """Test sentence-based chunking."""
+        text = "First sentence. Second sentence. Third sentence. Fourth sentence."
+        chunker = TextChunker(strategy='sentence', chunk_size=50, overlap=10)
+        
+        document = {
+            'content': [{'page': 1, 'content': text}],
+            'metadata': {'file_path': 'test.txt'},
+            'file_path': 'test.txt',
+            'file_type': 'txt'
+        }
+        
+        chunks = chunker.chunk_document(document)
+        
+        assert len(chunks) >= 1
+        assert all(isinstance(chunk, Chunk) for chunk in chunks)
+    
+    def test_empty_text_chunking(self):
         """Test chunking empty text."""
-        chunks = self.chunker.chunk_text("")
-        self.assertEqual(len(chunks), 0)
+        chunker = TextChunker()
+        
+        document = {
+            'content': [{'page': 1, 'content': ''}],
+            'metadata': {'file_path': 'test.txt'},
+            'file_path': 'test.txt',
+            'file_type': 'txt'
+        }
+        
+        chunks = chunker.chunk_document(document)
+        assert len(chunks) == 0
+    
+    def test_chunk_statistics(self):
+        """Test chunk statistics calculation."""
+        text = "This is a test. " * 50
+        chunker = TextChunker(strategy='fixed', chunk_size=100)
+        
+        document = {
+            'content': [{'page': 1, 'content': text}],
+            'metadata': {'file_path': 'test.txt'},
+            'file_path': 'test.txt',
+            'file_type': 'txt'
+        }
+        
+        chunks = chunker.chunk_document(document)
+        stats = chunker.get_chunk_statistics(chunks)
+        
+        assert 'total_chunks' in stats
+        assert 'total_characters' in stats
+        assert 'avg_chunk_length' in stats
+        assert stats['total_chunks'] == len(chunks)
 
-class TestConfig(unittest.TestCase):
-    """Test Config functionality."""
-    
-    def test_default_config(self):
-        """Test default configuration."""
-        config = Config()
-        chunk_size = config.get("chunking.chunk_size")
-        self.assertEqual(chunk_size, 1000)
-    
-    def test_set_config(self):
-        """Test setting configuration values."""
-        config = Config()
-        config.set("chunking.chunk_size", 500)
-        self.assertEqual(config.get("chunking.chunk_size"), 500)
-    
-    def test_nested_config(self):
-        """Test nested configuration access."""
-        config = Config()
-        provider = config.get("vector_db.provider")
-        self.assertEqual(provider, "chromadb")
 
-if __name__ == '__main__':
-    unittest.main() 
+class TestChunk:
+    """Test Chunk class functionality."""
+    
+    def test_chunk_creation(self):
+        """Test creating a chunk."""
+        chunk = Chunk(
+            content="Test content",
+            start_index=0,
+            end_index=12,
+            chunk_id="test_chunk"
+        )
+        
+        assert chunk.content == "Test content"
+        assert chunk.start_index == 0
+        assert chunk.end_index == 12
+        assert chunk.chunk_id == "test_chunk"
+        assert 'length' in chunk.metadata
+        assert 'word_count' in chunk.metadata
+    
+    def test_chunk_metadata_calculation(self):
+        """Test automatic metadata calculation."""
+        content = "This is a test chunk with multiple words."
+        chunk = Chunk(
+            content=content,
+            start_index=0,
+            end_index=len(content),
+            chunk_id="test"
+        )
+        
+        assert chunk.metadata['length'] == len(content)
+        assert chunk.metadata['word_count'] == len(content.split())
+        assert chunk.metadata['char_count'] == len(content)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__])
