@@ -1,513 +1,349 @@
 """
-Advanced AI Integration for RAGDocParser (2025).
-Next-generation AI features and intelligent document processing.
+Advanced AI integration for semantic analysis and intelligent processing.
 """
 
 import logging
 from typing import Dict, List, Any, Optional, Union, Tuple
-from dataclasses import dataclass
-from enum import Enum
-import json
-import asyncio
-from pathlib import Path
 import numpy as np
+from dataclasses import dataclass
+
+try:
+    from sentence_transformers import SentenceTransformer
+    SENTENCE_TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    SENTENCE_TRANSFORMERS_AVAILABLE = False
+
+from .config import config
+from .chunker import Chunk
 
 logger = logging.getLogger(__name__)
 
-class AICapability(Enum):
-    """AI capabilities supported by the system."""
-    DOCUMENT_CLASSIFICATION = "document_classification"
-    SEMANTIC_SUMMARIZATION = "semantic_summarization"
-    INTELLIGENT_CHUNKING = "intelligent_chunking"
-    RELEVANCE_SCORING = "relevance_scoring"
-    QUERY_EXPANSION = "query_expansion"
-    ANSWER_VALIDATION = "answer_validation"
-    CONTENT_EXTRACTION = "content_extraction"
-    MULTI_MODAL_PROCESSING = "multi_modal_processing"
 
 @dataclass
-class AIResult:
-    """Result from an AI operation."""
-    capability: AICapability
-    confidence: float
-    result: Any
-    metadata: Dict[str, Any]
-    processing_time: float
-    model_version: str = "unknown"
+class SemanticAnalysis:
+    """Results of semantic analysis."""
+    summary: str
+    key_topics: List[str]
+    sentiment_score: float
+    complexity_score: float
+    readability_score: float
+    entities: List[Dict[str, Any]]
+
+
+class SemanticAnalyzer:
+    """Advanced semantic analysis using AI models."""
+    
+    def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
+        self.model_name = model_name
+        self.model = None
+        
+        if SENTENCE_TRANSFORMERS_AVAILABLE:
+            try:
+                self.model = SentenceTransformer(model_name)
+                logger.info(f"Loaded semantic model: {model_name}")
+            except Exception as e:
+                logger.warning(f"Failed to load semantic model: {e}")
+    
+    def analyze_document(self, document: Dict[str, Any]) -> SemanticAnalysis:
+        """Perform comprehensive semantic analysis of a document."""
+        # Combine all content
+        content_parts = []
+        for page in document.get('content', []):
+            content_parts.append(page.get('content', ''))
+        
+        full_text = ' '.join(content_parts)
+        
+        # Perform various analyses
+        summary = self._generate_extractive_summary(full_text)
+        topics = self._extract_key_topics(full_text)
+        sentiment = self._analyze_sentiment(full_text)
+        complexity = self._calculate_complexity(full_text)
+        readability = self._calculate_readability(full_text)
+        entities = self._extract_entities(full_text)
+        
+        return SemanticAnalysis(
+            summary=summary,
+            key_topics=topics,
+            sentiment_score=sentiment,
+            complexity_score=complexity,
+            readability_score=readability,
+            entities=entities
+        )
+    
+    def _generate_extractive_summary(self, text: str, max_sentences: int = 3) -> str:
+        """Generate extractive summary by selecting key sentences."""
+        sentences = text.split('. ')
+        
+        if len(sentences) <= max_sentences:
+            return text
+        
+        # Simple extractive summarization - select sentences with high keyword density
+        # In a real implementation, you'd use more sophisticated methods
+        sentence_scores = []
+        
+        for sentence in sentences:
+            # Simple scoring based on sentence length and common words
+            words = sentence.split()
+            score = len(words) * 0.1  # Prefer longer sentences
+            
+            # Boost score for sentences with important indicators
+            important_words = ['important', 'significant', 'key', 'main', 'primary', 'conclusion']
+            for word in words:
+                if word.lower() in important_words:
+                    score += 1
+            
+            sentence_scores.append((sentence, score))
+        
+        # Select top sentences
+        sentence_scores.sort(key=lambda x: x[1], reverse=True)
+        top_sentences = [s[0] for s in sentence_scores[:max_sentences]]
+        
+        return '. '.join(top_sentences) + '.'
+    
+    def _extract_key_topics(self, text: str, max_topics: int = 5) -> List[str]:
+        """Extract key topics using simple keyword analysis."""
+        words = text.lower().split()
+        
+        # Remove common stop words
+        stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'is', 'are', 'was', 'were', 'be', 'been', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'this', 'that', 'these', 'those'}
+        
+        # Count word frequencies
+        word_freq = {}
+        for word in words:
+            if len(word) > 3 and word not in stop_words:
+                word_freq[word] = word_freq.get(word, 0) + 1
+        
+        # Get top words as topics
+        sorted_words = sorted(word_freq.items(), key=lambda x: x[1], reverse=True)
+        topics = [word for word, freq in sorted_words[:max_topics]]
+        
+        return topics
+    
+    def _analyze_sentiment(self, text: str) -> float:
+        """Analyze sentiment (simplified implementation)."""
+        # Simple sentiment analysis based on positive/negative word counts
+        positive_words = {'good', 'great', 'excellent', 'positive', 'success', 'effective', 'beneficial', 'advantage', 'improvement', 'better'}
+        negative_words = {'bad', 'poor', 'negative', 'failure', 'problem', 'issue', 'difficulty', 'challenge', 'worse', 'disadvantage'}
+        
+        words = text.lower().split()
+        positive_count = sum(1 for word in words if word in positive_words)
+        negative_count = sum(1 for word in words if word in negative_words)
+        
+        total_sentiment_words = positive_count + negative_count
+        if total_sentiment_words == 0:
+            return 0.0  # Neutral
+        
+        # Return score from -1 (very negative) to 1 (very positive)
+        return (positive_count - negative_count) / total_sentiment_words
+    
+    def _calculate_complexity(self, text: str) -> float:
+        """Calculate text complexity score."""
+        sentences = text.split('.')
+        words = text.split()
+        
+        if not sentences or not words:
+            return 0.0
+        
+        # Average sentence length
+        avg_sentence_length = len(words) / len(sentences)
+        
+        # Average word length
+        avg_word_length = sum(len(word) for word in words) / len(words)
+        
+        # Normalize to 0-1 scale (higher = more complex)
+        complexity = min(1.0, (avg_sentence_length / 20) * 0.5 + (avg_word_length / 10) * 0.5)
+        
+        return complexity
+    
+    def _calculate_readability(self, text: str) -> float:
+        """Calculate readability score (simplified Flesch Reading Ease)."""
+        sentences = len(text.split('.'))
+        words = len(text.split())
+        syllables = self._count_syllables(text)
+        
+        if sentences == 0 or words == 0:
+            return 0.0
+        
+        # Simplified Flesch Reading Ease formula
+        score = 206.835 - (1.015 * (words / sentences)) - (84.6 * (syllables / words))
+        
+        # Normalize to 0-1 scale (higher = more readable)
+        return max(0.0, min(1.0, score / 100))
+    
+    def _count_syllables(self, text: str) -> int:
+        """Simple syllable counting."""
+        words = text.lower().split()
+        syllable_count = 0
+        
+        for word in words:
+            # Simple vowel counting method
+            vowels = 'aeiouy'
+            word_syllables = 0
+            prev_was_vowel = False
+            
+            for char in word:
+                if char in vowels:
+                    if not prev_was_vowel:
+                        word_syllables += 1
+                    prev_was_vowel = True
+                else:
+                    prev_was_vowel = False
+            
+            # Every word has at least one syllable
+            if word_syllables == 0:
+                word_syllables = 1
+            
+            syllable_count += word_syllables
+        
+        return syllable_count
+    
+    def _extract_entities(self, text: str) -> List[Dict[str, Any]]:
+        """Extract named entities (simplified implementation)."""
+        # Simple pattern-based entity extraction
+        import re
+        
+        entities = []
+        
+        # Email addresses
+        email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+        emails = re.findall(email_pattern, text)
+        for email in emails:
+            entities.append({'type': 'EMAIL', 'text': email, 'confidence': 0.9})
+        
+        # Phone numbers (simple pattern)
+        phone_pattern = r'\b\d{3}[-.]?\d{3}[-.]?\d{4}\b'
+        phones = re.findall(phone_pattern, text)
+        for phone in phones:
+            entities.append({'type': 'PHONE', 'text': phone, 'confidence': 0.8})
+        
+        # URLs
+        url_pattern = r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\(\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'
+        urls = re.findall(url_pattern, text)
+        for url in urls:
+            entities.append({'type': 'URL', 'text': url, 'confidence': 0.95})
+        
+        # Dates (simple pattern)
+        date_pattern = r'\b\d{1,2}/\d{1,2}/\d{4}\b|\b\d{4}-\d{2}-\d{2}\b'
+        dates = re.findall(date_pattern, text)
+        for date in dates:
+            entities.append({'type': 'DATE', 'text': date, 'confidence': 0.7})
+        
+        return entities
+
 
 class IntelligentChunker:
-    """AI-powered intelligent text chunking."""
+    """Intelligent chunking using semantic similarity."""
     
-    def __init__(self, model_name: str = "semantic-chunker-v1"):
-        """Initialize intelligent chunker."""
-        self.model_name = model_name
-        self.semantic_boundaries = [
-            "Introduction", "Background", "Method", "Results", 
-            "Discussion", "Conclusion", "References"
-        ]
+    def __init__(self, semantic_analyzer: Optional[SemanticAnalyzer] = None):
+        self.analyzer = semantic_analyzer or SemanticAnalyzer()
     
-    def chunk_intelligently(
-        self, 
-        text: str, 
-        target_chunk_size: int = 1000,
-        preserve_semantic_boundaries: bool = True
-    ) -> List[Dict[str, Any]]:
-        """Chunk text using AI-powered semantic understanding."""
+    def chunk_by_semantic_similarity(self, text: str, target_chunk_size: int = 1000, similarity_threshold: float = 0.7) -> List[Chunk]:
+        """Chunk text based on semantic similarity between sentences."""
+        if not self.analyzer.model:
+            # Fallback to simple sentence-based chunking
+            return self._fallback_chunking(text, target_chunk_size)
         
-        # Simulate AI-powered semantic analysis
-        sentences = self._split_into_sentences(text)
-        semantic_scores = self._calculate_semantic_coherence(sentences)
+        sentences = text.split('. ')
+        if len(sentences) <= 1:
+            return [Chunk(content=text, start_index=0, end_index=len(text), chunk_id="chunk_0")]
         
+        # Generate embeddings for sentences
+        try:
+            embeddings = self.analyzer.model.encode(sentences)
+        except Exception as e:
+            logger.warning(f"Failed to generate embeddings: {e}")
+            return self._fallback_chunking(text, target_chunk_size)
+        
+        # Group sentences by semantic similarity
         chunks = []
-        current_chunk = []
-        current_size = 0
+        current_chunk_sentences = [sentences[0]]
+        current_chunk_embeddings = [embeddings[0]]
         
-        for i, sentence in enumerate(sentences):
-            sentence_size = len(sentence.split())
+        for i in range(1, len(sentences)):
+            # Calculate similarity with current chunk
+            chunk_embedding = np.mean(current_chunk_embeddings, axis=0)
+            similarity = np.dot(chunk_embedding, embeddings[i]) / (
+                np.linalg.norm(chunk_embedding) * np.linalg.norm(embeddings[i])
+            )
             
-            # Check if adding this sentence would exceed target size
-            if current_size + sentence_size > target_chunk_size and current_chunk:
-                # Check semantic boundary score
-                if preserve_semantic_boundaries and semantic_scores[i] < 0.5:
-                    # Low semantic coherence - good place to break
-                    chunks.append(self._create_chunk(current_chunk, i))
-                    current_chunk = [sentence]
-                    current_size = sentence_size
-                else:
-                    current_chunk.append(sentence)
-                    current_size += sentence_size
+            # Check if sentence should be added to current chunk
+            current_chunk_text = '. '.join(current_chunk_sentences)
+            would_exceed_size = len(current_chunk_text) + len(sentences[i]) > target_chunk_size
+            
+            if similarity >= similarity_threshold and not would_exceed_size:
+                current_chunk_sentences.append(sentences[i])
+                current_chunk_embeddings.append(embeddings[i])
             else:
-                current_chunk.append(sentence)
-                current_size += sentence_size
+                # Finalize current chunk and start new one
+                chunk_text = '. '.join(current_chunk_sentences)
+                start_idx = text.find(current_chunk_sentences[0])
+                end_idx = start_idx + len(chunk_text)
+                
+                chunk = Chunk(
+                    content=chunk_text,
+                    start_index=start_idx,
+                    end_index=end_idx,
+                    chunk_id=f"semantic_chunk_{len(chunks)}",
+                    metadata={'chunking_method': 'semantic_similarity', 'avg_similarity': float(np.mean([similarity]))}
+                )
+                chunks.append(chunk)
+                
+                # Start new chunk
+                current_chunk_sentences = [sentences[i]]
+                current_chunk_embeddings = [embeddings[i]]
         
-        if current_chunk:
-            chunks.append(self._create_chunk(current_chunk, len(sentences)))
+        # Add final chunk
+        if current_chunk_sentences:
+            chunk_text = '. '.join(current_chunk_sentences)
+            start_idx = text.find(current_chunk_sentences[0])
+            end_idx = start_idx + len(chunk_text)
+            
+            chunk = Chunk(
+                content=chunk_text,
+                start_index=start_idx,
+                end_index=end_idx,
+                chunk_id=f"semantic_chunk_{len(chunks)}",
+                metadata={'chunking_method': 'semantic_similarity'}
+            )
+            chunks.append(chunk)
         
         return chunks
     
-    def _split_into_sentences(self, text: str) -> List[str]:
-        """Split text into sentences with improved accuracy."""
-        import re
+    def _fallback_chunking(self, text: str, target_size: int) -> List[Chunk]:
+        """Fallback to simple chunking when semantic analysis fails."""
+        chunks = []
+        sentences = text.split('. ')
+        current_chunk = ""
+        chunk_id = 0
         
-        # Enhanced sentence splitting with abbreviation handling
-        sentences = re.split(r'(?<!\w\.\w.)(?<![A-Z][a-z]\.)(?<=\.|\!|\?)\s', text)
-        return [s.strip() for s in sentences if s.strip()]
-    
-    def _calculate_semantic_coherence(self, sentences: List[str]) -> List[float]:
-        """Calculate semantic coherence scores between adjacent sentences."""
-        scores = []
-        
-        for i in range(len(sentences)):
-            if i == 0:
-                scores.append(1.0)  # First sentence always has high coherence
-                continue
-            
-            # Simulate semantic similarity calculation
-            prev_words = set(sentences[i-1].lower().split())
-            curr_words = set(sentences[i].lower().split())
-            
-            if not prev_words or not curr_words:
-                scores.append(0.5)
-                continue
-            
-            # Jaccard similarity as semantic coherence proxy
-            intersection = prev_words.intersection(curr_words)
-            union = prev_words.union(curr_words)
-            
-            similarity = len(intersection) / len(union) if union else 0
-            
-            # Boost score if semantic boundary keywords are present
-            boundary_bonus = 0
-            for boundary in self.semantic_boundaries:
-                if boundary.lower() in sentences[i].lower():
-                    boundary_bonus = 0.3
-                    break
-            
-            scores.append(min(similarity + boundary_bonus, 1.0))
-        
-        return scores
-    
-    def _create_chunk(self, sentences: List[str], chunk_index: int) -> Dict[str, Any]:
-        """Create a chunk with metadata."""
-        content = " ".join(sentences)
-        
-        return {
-            "content": content,
-            "word_count": len(content.split()),
-            "sentence_count": len(sentences),
-            "chunk_index": chunk_index,
-            "semantic_type": self._detect_semantic_type(content),
-            "key_topics": self._extract_key_topics(content)
-        }
-    
-    def _detect_semantic_type(self, content: str) -> str:
-        """Detect the semantic type of content."""
-        content_lower = content.lower()
-        
-        for boundary in self.semantic_boundaries:
-            if boundary.lower() in content_lower:
-                return boundary.lower()
-        
-        # Simple heuristics
-        if any(word in content_lower for word in ["method", "approach", "algorithm"]):
-            return "methodology"
-        elif any(word in content_lower for word in ["result", "finding", "outcome"]):
-            return "results"
-        elif any(word in content_lower for word in ["conclusion", "summary"]):
-            return "conclusion"
-        else:
-            return "general"
-    
-    def _extract_key_topics(self, content: str) -> List[str]:
-        """Extract key topics from content."""
-        import re
-        from collections import Counter
-        
-        # Simple keyword extraction
-        words = re.findall(r'\b[a-zA-Z]{4,}\b', content.lower())
-        
-        # Filter common words
-        stop_words = {
-            "this", "that", "with", "have", "will", "from", "they", "been",
-            "were", "said", "each", "which", "their", "time", "some", "more"
-        }
-        
-        filtered_words = [w for w in words if w not in stop_words]
-        
-        # Get most common words as topics
-        word_counts = Counter(filtered_words)
-        return [word for word, count in word_counts.most_common(5)]
-
-class QueryExpander:
-    """AI-powered query expansion for better retrieval."""
-    
-    def __init__(self):
-        """Initialize query expander."""
-        self.synonyms_db = self._load_synonyms_database()
-        self.concept_mappings = self._load_concept_mappings()
-    
-    def expand_query(self, query: str, expansion_level: str = "moderate") -> Dict[str, Any]:
-        """Expand query with related terms and concepts."""
-        original_terms = query.lower().split()
-        expanded_terms = set(original_terms)
-        
-        # Add synonyms
-        for term in original_terms:
-            synonyms = self.synonyms_db.get(term, [])
-            if expansion_level == "aggressive":
-                expanded_terms.update(synonyms[:3])  # Top 3 synonyms
-            elif expansion_level == "moderate":
-                expanded_terms.update(synonyms[:2])  # Top 2 synonyms
-            else:  # conservative
-                expanded_terms.update(synonyms[:1])  # Top 1 synonym
-        
-        # Add concept-related terms
-        for term in original_terms:
-            concepts = self.concept_mappings.get(term, [])
-            if expansion_level == "aggressive":
-                expanded_terms.update(concepts[:2])
-            elif expansion_level == "moderate":
-                expanded_terms.update(concepts[:1])
-        
-        # Generate expanded query variations
-        expanded_query = " ".join(expanded_terms)
-        
-        return {
-            "original_query": query,
-            "expanded_query": expanded_query,
-            "added_terms": list(expanded_terms - set(original_terms)),
-            "expansion_level": expansion_level,
-            "term_count": len(expanded_terms)
-        }
-    
-    def _load_synonyms_database(self) -> Dict[str, List[str]]:
-        """Load synonyms database (simplified for demo)."""
-        return {
-            "document": ["file", "paper", "text", "manuscript"],
-            "search": ["find", "locate", "retrieve", "discover"],
-            "analysis": ["examination", "study", "investigation", "assessment"],
-            "method": ["approach", "technique", "procedure", "strategy"],
-            "result": ["outcome", "finding", "conclusion", "output"],
-            "data": ["information", "facts", "statistics", "records"],
-            "system": ["framework", "platform", "architecture", "structure"],
-            "process": ["procedure", "workflow", "operation", "method"],
-            "model": ["framework", "representation", "pattern", "template"],
-            "performance": ["efficiency", "effectiveness", "capability", "quality"]
-        }
-    
-    def _load_concept_mappings(self) -> Dict[str, List[str]]:
-        """Load concept mappings (simplified for demo)."""
-        return {
-            "machine learning": ["neural networks", "algorithms", "artificial intelligence"],
-            "database": ["storage", "repository", "data management"],
-            "web": ["internet", "online", "browser", "http"],
-            "security": ["encryption", "authentication", "privacy", "protection"],
-            "performance": ["optimization", "speed", "efficiency", "scalability"],
-            "user": ["customer", "client", "end-user", "person"],
-            "interface": ["UI", "GUI", "frontend", "user experience"],
-            "backend": ["server", "database", "API", "infrastructure"]
-        }
-
-class SemanticSummarizer:
-    """AI-powered semantic summarization."""
-    
-    def __init__(self):
-        """Initialize semantic summarizer."""
-        self.summary_templates = {
-            "extractive": "key_sentences",
-            "abstractive": "generated_summary",
-            "bullet_points": "structured_points"
-        }
-    
-    def summarize_content(
-        self, 
-        content: str, 
-        summary_type: str = "extractive",
-        max_length: int = 200
-    ) -> Dict[str, Any]:
-        """Generate semantic summary of content."""
-        
-        if summary_type == "extractive":
-            summary = self._extractive_summary(content, max_length)
-        elif summary_type == "abstractive":
-            summary = self._abstractive_summary(content, max_length)
-        else:  # bullet_points
-            summary = self._bullet_point_summary(content)
-        
-        return {
-            "summary": summary,
-            "summary_type": summary_type,
-            "original_length": len(content.split()),
-            "summary_length": len(summary.split()) if isinstance(summary, str) else len(summary),
-            "compression_ratio": len(summary.split()) / len(content.split()) if isinstance(summary, str) else 0.5
-        }
-    
-    def _extractive_summary(self, content: str, max_length: int) -> str:
-        """Create extractive summary by selecting key sentences."""
-        sentences = self._split_into_sentences(content)
-        
-        if not sentences:
-            return ""
-        
-        # Score sentences by keyword frequency and position
-        sentence_scores = []
-        word_freq = self._calculate_word_frequency(content)
-        
-        for i, sentence in enumerate(sentences):
-            score = 0
-            words = sentence.lower().split()
-            
-            # Position bonus (beginning and end are important)
-            position_bonus = 1.0 if i < len(sentences) * 0.2 or i > len(sentences) * 0.8 else 0.5
-            
-            # Word frequency score
-            for word in words:
-                score += word_freq.get(word, 0)
-            
-            # Length penalty (very short or very long sentences)
-            length_penalty = 1.0 if 10 <= len(words) <= 30 else 0.5
-            
-            final_score = (score / len(words)) * position_bonus * length_penalty
-            sentence_scores.append((sentence, final_score))
-        
-        # Select top sentences up to max_length
-        sentence_scores.sort(key=lambda x: x[1], reverse=True)
-        
-        selected_sentences = []
-        total_words = 0
-        
-        for sentence, score in sentence_scores:
-            sentence_words = len(sentence.split())
-            if total_words + sentence_words <= max_length:
-                selected_sentences.append(sentence)
-                total_words += sentence_words
-            else:
-                break
-        
-        return " ".join(selected_sentences)
-    
-    def _abstractive_summary(self, content: str, max_length: int) -> str:
-        """Create abstractive summary (simplified simulation)."""
-        # This would normally use a transformer model
-        # For demo, we create a template-based summary
-        
-        key_points = self._extract_key_points(content)
-        
-        if not key_points:
-            return self._extractive_summary(content, max_length)
-        
-        # Generate abstractive summary template
-        summary_parts = []
-        
-        if len(key_points) >= 1:
-            summary_parts.append(f"The main focus is {key_points[0]}.")
-        
-        if len(key_points) >= 2:
-            summary_parts.append(f"Key aspects include {key_points[1]}.")
-        
-        if len(key_points) >= 3:
-            summary_parts.append(f"Additionally, {key_points[2]} is discussed.")
-        
-        summary = " ".join(summary_parts)
-        
-        # Truncate if too long
-        words = summary.split()
-        if len(words) > max_length:
-            summary = " ".join(words[:max_length])
-        
-        return summary
-    
-    def _bullet_point_summary(self, content: str) -> List[str]:
-        """Create bullet point summary."""
-        key_points = self._extract_key_points(content)
-        
-        bullet_points = []
-        for point in key_points[:5]:  # Top 5 points
-            bullet_points.append(f"• {point.capitalize()}")
-        
-        return bullet_points
-    
-    def _split_into_sentences(self, text: str) -> List[str]:
-        """Split text into sentences."""
-        import re
-        sentences = re.split(r'(?<=\.)\s+', text)
-        return [s.strip() for s in sentences if len(s.strip()) > 10]
-    
-    def _calculate_word_frequency(self, text: str) -> Dict[str, float]:
-        """Calculate word frequency scores."""
-        from collections import Counter
-        import re
-        
-        words = re.findall(r'\b[a-zA-Z]{3,}\b', text.lower())
-        
-        # Filter stop words
-        stop_words = {
-            "the", "and", "are", "for", "with", "this", "that", "have",
-            "will", "from", "they", "been", "were", "said", "each", "which"
-        }
-        
-        filtered_words = [w for w in words if w not in stop_words]
-        word_counts = Counter(filtered_words)
-        
-        # Normalize frequencies
-        max_count = max(word_counts.values()) if word_counts else 1
-        return {word: count / max_count for word, count in word_counts.items()}
-    
-    def _extract_key_points(self, content: str) -> List[str]:
-        """Extract key points from content."""
-        # Simple key point extraction based on sentence patterns
-        import re
-        
-        sentences = self._split_into_sentences(content)
-        key_patterns = [
-            r'the main.*?is',
-            r'important.*?to',
-            r'significant.*?that',
-            r'results.*?show',
-            r'findings.*?indicate',
-            r'conclusion.*?that'
-        ]
-        
-        key_points = []
         for sentence in sentences:
-            for pattern in key_patterns:
-                if re.search(pattern, sentence.lower()):
-                    # Extract the relevant part
-                    key_points.append(sentence[:100] + "..." if len(sentence) > 100 else sentence)
-                    break
-        
-        return key_points[:10]  # Return top 10 key points
-
-class AIIntegrationManager:
-    """Main manager for AI integration features."""
-    
-    def __init__(self):
-        """Initialize AI integration manager."""
-        self.chunker = IntelligentChunker()
-        self.query_expander = QueryExpander()
-        self.summarizer = SemanticSummarizer()
-        self.capabilities = set(AICapability)
-    
-    def process_with_ai(
-        self, 
-        capability: AICapability, 
-        content: str, 
-        **kwargs
-    ) -> AIResult:
-        """Process content using specified AI capability."""
-        import time
-        
-        start_time = time.perf_counter()
-        
-        try:
-            if capability == AICapability.INTELLIGENT_CHUNKING:
-                result = self.chunker.chunk_intelligently(content, **kwargs)
-            elif capability == AICapability.QUERY_EXPANSION:
-                result = self.query_expander.expand_query(content, **kwargs)
-            elif capability == AICapability.SEMANTIC_SUMMARIZATION:
-                result = self.summarizer.summarize_content(content, **kwargs)
+            if len(current_chunk) + len(sentence) <= target_size:
+                current_chunk += sentence + ". "
             else:
-                raise ValueError(f"Unsupported AI capability: {capability}")
-            
-            end_time = time.perf_counter()
-            
-            return AIResult(
-                capability=capability,
-                confidence=0.85,  # Simulated confidence score
-                result=result,
-                metadata=kwargs,
-                processing_time=end_time - start_time,
-                model_version="ai-integration-v1.0"
+                if current_chunk:
+                    start_idx = text.find(current_chunk.strip())
+                    chunk = Chunk(
+                        content=current_chunk.strip(),
+                        start_index=start_idx,
+                        end_index=start_idx + len(current_chunk.strip()),
+                        chunk_id=f"fallback_chunk_{chunk_id}",
+                        metadata={'chunking_method': 'fallback_sentence'}
+                    )
+                    chunks.append(chunk)
+                    chunk_id += 1
+                
+                current_chunk = sentence + ". "
+        
+        # Add final chunk
+        if current_chunk:
+            start_idx = text.find(current_chunk.strip())
+            chunk = Chunk(
+                content=current_chunk.strip(),
+                start_index=start_idx,
+                end_index=start_idx + len(current_chunk.strip()),
+                chunk_id=f"fallback_chunk_{chunk_id}",
+                metadata={'chunking_method': 'fallback_sentence'}
             )
-            
-        except Exception as e:
-            end_time = time.perf_counter()
-            logger.error(f"AI processing failed for {capability}: {e}")
-            
-            return AIResult(
-                capability=capability,
-                confidence=0.0,
-                result=None,
-                metadata={"error": str(e)},
-                processing_time=end_time - start_time
-            )
-    
-    def get_available_capabilities(self) -> List[str]:
-        """Get list of available AI capabilities."""
-        return [cap.value for cap in self.capabilities]
-    
-    def validate_capability(self, capability: str) -> bool:
-        """Validate if a capability is supported."""
-        try:
-            AICapability(capability)
-            return True
-        except ValueError:
-            return False
-
-# Global AI integration manager
-_global_ai_manager: Optional[AIIntegrationManager] = None
-
-def get_ai_manager() -> AIIntegrationManager:
-    """Get or create the global AI integration manager."""
-    global _global_ai_manager
-    if _global_ai_manager is None:
-        _global_ai_manager = AIIntegrationManager()
-    return _global_ai_manager
-
-def intelligent_chunk_text(text: str, **kwargs) -> List[Dict[str, Any]]:
-    """Convenience function for intelligent text chunking."""
-    manager = get_ai_manager()
-    result = manager.process_with_ai(AICapability.INTELLIGENT_CHUNKING, text, **kwargs)
-    return result.result if result.result else []
-
-def expand_query_ai(query: str, **kwargs) -> Dict[str, Any]:
-    """Convenience function for AI-powered query expansion."""
-    manager = get_ai_manager()
-    result = manager.process_with_ai(AICapability.QUERY_EXPANSION, query, **kwargs)
-    return result.result if result.result else {"original_query": query, "expanded_query": query}
-
-def summarize_with_ai(content: str, **kwargs) -> Dict[str, Any]:
-    """Convenience function for AI-powered summarization."""
-    manager = get_ai_manager()
-    result = manager.process_with_ai(AICapability.SEMANTIC_SUMMARIZATION, content, **kwargs)
-    return result.result if result.result else {"summary": content[:200] + "...", "summary_type": "truncated"} 
+            chunks.append(chunk)
+        
+        return chunks
