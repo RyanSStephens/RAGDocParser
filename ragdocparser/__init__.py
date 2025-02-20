@@ -1,8 +1,12 @@
 """
 RAG Document Parser - A comprehensive document processing system for RAG applications.
+
+A production-ready system for parsing, chunking, and indexing documents for
+Retrieval-Augmented Generation (RAG) applications. Supports multiple document
+formats, OCR, web scraping, vector databases, and AI-powered analysis.
 """
 
-__version__ = "0.3.0"
+__version__ = "1.5.0"
 __author__ = "Ryan Stephens"
 __email__ = "ryan@example.com"
 
@@ -25,6 +29,16 @@ except ImportError:
 
 try:
     from .llm_providers import LLMManager, OpenAIProvider, AnthropicProvider
+except ImportError:
+    pass
+
+try:
+    from .monitoring import PerformanceMonitor, performance_monitor
+except ImportError:
+    pass
+
+try:
+    from .ai_integration import SemanticAnalyzer, IntelligentChunker
 except ImportError:
     pass
 
